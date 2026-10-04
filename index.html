@@ -1,0 +1,338 @@
+<body>
+    <canvas id="main-canvas"></canvas>
+
+    <div id="hud">
+        <div id="bottom-bar">
+            <button id="btn-play" title="Play/Pause(Space)">▶</button>
+            <div id="progress-wrap">
+                <div id="progress-fill"></div>
+                <div id="progress-marks"></div>
+            </div>
+            <span id="time-label">0.00 / 0.00</span>
+            <button id="btn-library" title="谱面库 (L)">▤</button>
+        </div>
+
+        <div id="start-overlay" class="hidden"><span>Click to start</span></div>
+
+        <div id="loading-overlay" class="hidden">
+            <div id="loading-label">Loading</div>
+            <div id="loading-bar">
+                <div id="loading-fill"></div>
+            </div>
+            <div id="loading-text">0%</div>
+        </div>
+
+        <div id="library-overlay" class="hidden">
+            <div id="library-head">
+                <span id="library-title">谱面库</span>
+                <span id="library-count"></span>
+                <button id="library-close" title="关闭 (Esc)">✕</button>
+            </div>
+            <div id="library-grid"></div>
+        </div>
+    </div>
+</body>
+
+<style>
+    :root {
+        --hud-fg: #e8e8ef;
+        --hud-fg-dim: #8b8b9c;
+        --hud-bg: rgba(12, 12, 18, 0.72);
+        --hud-line: rgba(255, 255, 255, 0.14);
+        --hud-accent: #ff5454;
+    }
+
+    body {
+        padding: 0;
+        border: 0;
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+        font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    #main-canvas {
+        position: absolute;
+        left: 0;
+        top: 0;
+    }
+
+    #hud {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        color: var(--hud-fg);
+        user-select: none;
+    }
+
+    #bottom-bar {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 18px 14px;
+        background: linear-gradient(to top, rgba(0, 0, 0, 0.82), transparent);
+        pointer-events: auto;
+        font-size: 12px;
+    }
+
+    #btn-play {
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+        font-size: 13px;
+        color: var(--hud-fg);
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-line);
+        border-radius: 50%;
+        cursor: pointer;
+    }
+
+    #progress-wrap {
+        position: relative;
+        flex: 1 1 auto;
+        height: 22px;
+        cursor: pointer;
+    }
+
+    #progress-wrap::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 9px;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.16);
+    }
+
+    #progress-fill {
+        position: absolute;
+        left: 0;
+        top: 9px;
+        height: 4px;
+        width: 0;
+        border-radius: 2px;
+        background: var(--hud-accent);
+    }
+
+    #progress-marks { position: absolute; inset: 0; }
+
+    #progress-marks i {
+        position: absolute;
+        top: 5px;
+        width: 1px;
+        height: 12px;
+        background: rgba(255, 255, 255, 0.34);
+    }
+
+    #time-label {
+        flex: 0 0 auto;
+        min-width: 104px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: var(--hud-fg-dim);
+    }
+
+    #start-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.62);
+        font-size: 22px;
+        letter-spacing: 0.06em;
+        pointer-events: auto;
+        cursor: pointer;
+    }
+
+    #start-overlay.hidden { display: none; }
+
+    /* ---- Loading 浮层（load_chart 装载时显示进度条） ---- */
+
+    #loading-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: rgba(0, 0, 0, 0.88);
+        pointer-events: auto;
+    }
+
+    #loading-overlay.hidden { display: none; }
+
+    #loading-label {
+        font-size: 16px;
+        letter-spacing: 0.08em;
+        color: var(--hud-fg);
+    }
+
+    #loading-bar {
+        width: 240px;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+
+    #loading-fill {
+        height: 100%;
+        width: 0;
+        background: var(--hud-accent);
+        transition: width 0.2s;
+    }
+
+    #loading-text {
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+        color: var(--hud-fg-dim);
+    }
+
+    /* ---- 谱面库（import_library.py 生成的 res/library/index.json 驱动） ---- */
+
+    #btn-library {
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+        font-size: 14px;
+        color: var(--hud-fg);
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-line);
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    #library-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        background: rgba(6, 6, 12, 0.94);
+        backdrop-filter: blur(6px);
+        pointer-events: auto;
+    }
+
+    #library-overlay.hidden { display: none; }
+
+    #library-head {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 26px 8px;
+        flex: 0 0 auto;
+    }
+
+    #library-title { font-size: 18px; letter-spacing: 0.05em; }
+
+    #library-count {
+        font-size: 12px;
+        color: var(--hud-fg-dim);
+        flex: 1 1 auto;
+    }
+
+    #library-close {
+        width: 30px;
+        height: 30px;
+        font-size: 13px;
+        color: var(--hud-fg);
+        background: transparent;
+        border: 1px solid var(--hud-line);
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    #library-grid {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+        gap: 14px;
+        padding: 12px 26px 26px;
+        align-content: start;
+    }
+
+    .lib-card {
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-line);
+        border-radius: 10px;
+        overflow: hidden;
+        cursor: pointer;
+        transition: transform 0.12s, border-color 0.12s;
+        /* 关键：Chrome 对「overflow:hidden 的 grid item」做 auto 行高时行高会塌成 ~49px
+           （子内容 212px 被裁没，见 2026-10-03 对照实验）。显式 max-content 让行高吃内容。 */
+        height: max-content;
+    }
+
+    .lib-card:hover {
+        transform: translateY(-2px);
+        border-color: rgba(255, 255, 255, 0.45);
+    }
+
+    .lib-cover {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        background: #101018;
+    }
+
+    .lib-body { padding: 8px 10px 10px; }
+
+    .lib-name {
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .lib-sub {
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--hud-fg-dim);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .lib-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 7px;
+    }
+
+    /* 难度色沿用 Phigros 习惯：EZ 绿 / HD 蓝 / IN 橙 / AT 红 / SP 紫 */
+    .lib-diff {
+        flex: 0 0 auto;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: #fff;
+        background: #666;
+        padding: 1px 7px;
+        border-radius: 4px;
+    }
+
+    .lib-diff.d-EZ { background: #2fa860; }
+    .lib-diff.d-HD { background: #2f7fd8; }
+    .lib-diff.d-IN { background: #d8862f; }
+    .lib-diff.d-AT { background: #d83a3a; }
+    .lib-diff.d-SP { background: #8b4fd8; }
+
+    .lib-level {
+        font-size: 11px;
+        color: var(--hud-fg-dim);
+        font-variant-numeric: tabular-nums;
+    }
+</style>
+
+<script src="/main.js"></script>

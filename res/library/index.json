@@ -1,0 +1,323 @@
+{
+  "charts": [
+    {
+      "path": "/res/library/Ametrine.GRYSCLMIssionary/EZ",
+      "asset": "/res/library/Ametrine.GRYSCLMIssionary",
+      "cover": "/res/library/Ametrine.GRYSCLMIssionary/image.png",
+      "name": "Ametrine",
+      "song": "Ametrine.GRYSCLMIssionary",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.6.0",
+      "composer": "GRYSCL & MIssionary",
+      "charter": "Enstatite"
+    },
+    {
+      "path": "/res/library/Ametrine.GRYSCLMIssionary/HD",
+      "asset": "/res/library/Ametrine.GRYSCLMIssionary",
+      "cover": "/res/library/Ametrine.GRYSCLMIssionary/image.png",
+      "name": "Ametrine",
+      "song": "Ametrine.GRYSCLMIssionary",
+      "difficulty": "HD",
+      "level": "HD  Lv.12.2",
+      "composer": "GRYSCL & MIssionary",
+      "charter": "Heliodor"
+    },
+    {
+      "path": "/res/library/Ametrine.GRYSCLMIssionary/IN",
+      "asset": "/res/library/Ametrine.GRYSCLMIssionary",
+      "cover": "/res/library/Ametrine.GRYSCLMIssionary/image.png",
+      "name": "Ametrine",
+      "song": "Ametrine.GRYSCLMIssionary",
+      "difficulty": "IN",
+      "level": "IN  Lv.15.0",
+      "composer": "GRYSCL & MIssionary",
+      "charter": "Indigolite"
+    },
+    {
+      "path": "/res/library/Ametrine.GRYSCLMIssionary/AT",
+      "asset": "/res/library/Ametrine.GRYSCLMIssionary",
+      "cover": "/res/library/Ametrine.GRYSCLMIssionary/image.png",
+      "name": "Ametrine",
+      "song": "Ametrine.GRYSCLMIssionary",
+      "difficulty": "AT",
+      "level": "AT  Lv.16.2",
+      "composer": "GRYSCL & MIssionary",
+      "charter": "Ametrine"
+    },
+    {
+      "path": "/res/library/DesultorySignals.technoplanet/EZ",
+      "asset": "/res/library/DesultorySignals.technoplanet",
+      "cover": "/res/library/DesultorySignals.technoplanet/image.png",
+      "name": "Desultory Signals",
+      "song": "DesultorySignals.technoplanet",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.10.0",
+      "composer": "technoplanet",
+      "charter": "Hesitating Trepidation \\\"踌躇的惶恐\\\""
+    },
+    {
+      "path": "/res/library/DesultorySignals.technoplanet/HD",
+      "asset": "/res/library/DesultorySignals.technoplanet",
+      "cover": "/res/library/DesultorySignals.technoplanet/image.png",
+      "name": "Desultory Signals",
+      "song": "DesultorySignals.technoplanet",
+      "difficulty": "HD",
+      "level": "HD  Lv.14.0",
+      "composer": "technoplanet",
+      "charter": "Denying Pseudomorph \\\"否认的伪形\\\""
+    },
+    {
+      "path": "/res/library/DesultorySignals.technoplanet/IN",
+      "asset": "/res/library/DesultorySignals.technoplanet",
+      "cover": "/res/library/DesultorySignals.technoplanet/image.png",
+      "name": "Desultory Signals",
+      "song": "DesultorySignals.technoplanet",
+      "difficulty": "IN",
+      "level": "IN  Lv.17.0",
+      "composer": "technoplanet",
+      "charter": "Retaliating Resolve \\\"反击的决意\\\""
+    },
+    {
+      "path": "/res/library/DesultorySignals.technoplanet/AT",
+      "asset": "/res/library/DesultorySignals.technoplanet",
+      "cover": "/res/library/DesultorySignals.technoplanet/image.png",
+      "name": "Desultory Signals",
+      "song": "DesultorySignals.technoplanet",
+      "difficulty": "AT",
+      "level": "AT  Lv.18.0",
+      "composer": "technoplanet",
+      "charter": "Ceaseless Signal \\\"不息的信号\\\""
+    },
+    {
+      "path": "/res/library/Message/EZ",
+      "asset": "/res/library/Message",
+      "cover": "/res/library/Message/image.png",
+      "name": "Message",
+      "song": "Message.くるぶっこちゃん",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.3.0",
+      "composer": "くるぶっこちゃん",
+      "charter": "■■■p■l■a"
+    },
+    {
+      "path": "/res/library/Message/HD",
+      "asset": "/res/library/Message",
+      "cover": "/res/library/Message/image.png",
+      "name": "Message",
+      "song": "Message.くるぶっこちゃん",
+      "difficulty": "HD",
+      "level": "HD  Lv.13.2",
+      "composer": "くるぶっこちゃん",
+      "charter": "■■o■elia's l"
+    },
+    {
+      "path": "/res/library/Message/IN",
+      "asset": "/res/library/Message",
+      "cover": "/res/library/Message/image.png",
+      "name": "Message",
+      "song": "Message.くるぶっこちゃん",
+      "difficulty": "IN",
+      "level": "IN  Lv.15.6",
+      "composer": "くるぶっこちゃん",
+      "charter": "Geo■elia's lov"
+    },
+    {
+      "path": "/res/library/Message/AT",
+      "asset": "/res/library/Message",
+      "cover": "/res/library/Message/image.png",
+      "name": "Message",
+      "song": "Message.くるぶっこちゃん",
+      "difficulty": "AT",
+      "level": "AT  Lv.16.5",
+      "composer": "くるぶっこちゃん",
+      "charter": "Geopelia's love 2u"
+    },
+    {
+      "path": "/res/library/Message/SP",
+      "asset": "/res/library/Message",
+      "cover": "/res/library/Message/image.png",
+      "name": "Message",
+      "song": "Message.くるぶっこちゃん",
+      "difficulty": "SP",
+      "level": "SP  Lv.?",
+      "composer": "くるぶっこちゃん",
+      "charter": ""
+    },
+    {
+      "path": "/res/library/Petrichor.voidMournfinale/EZ",
+      "asset": "/res/library/Petrichor.voidMournfinale",
+      "cover": "/res/library/Petrichor.voidMournfinale/image.png",
+      "name": "Petrichor",
+      "song": "Petrichor.voidMournfinale",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.7.5",
+      "composer": "void (Mournfinale)",
+      "charter": "Seed | Promise"
+    },
+    {
+      "path": "/res/library/Petrichor.voidMournfinale/HD",
+      "asset": "/res/library/Petrichor.voidMournfinale",
+      "cover": "/res/library/Petrichor.voidMournfinale/image.png",
+      "name": "Petrichor",
+      "song": "Petrichor.voidMournfinale",
+      "difficulty": "HD",
+      "level": "HD  Lv.13.8",
+      "composer": "void (Mournfinale)",
+      "charter": "Rain | Rewrites"
+    },
+    {
+      "path": "/res/library/Petrichor.voidMournfinale/IN",
+      "asset": "/res/library/Petrichor.voidMournfinale",
+      "cover": "/res/library/Petrichor.voidMournfinale/image.png",
+      "name": "Petrichor",
+      "song": "Petrichor.voidMournfinale",
+      "difficulty": "IN",
+      "level": "IN  Lv.16.5",
+      "composer": "void (Mournfinale)",
+      "charter": "Silence | Us"
+    },
+    {
+      "path": "/res/library/Petrichor.voidMournfinale/AT",
+      "asset": "/res/library/Petrichor.voidMournfinale",
+      "cover": "/res/library/Petrichor.voidMournfinale/image.png",
+      "name": "Petrichor",
+      "song": "Petrichor.voidMournfinale",
+      "difficulty": "AT",
+      "level": "AT  Lv.17.5",
+      "composer": "void (Mournfinale)",
+      "charter": "Return | Petrichor"
+    },
+    {
+      "path": "/res/s6",
+      "name": "True Home, True World",
+      "song": "s6 (built-in)",
+      "difficulty": "IN",
+      "level": "IN  Lv.?",
+      "composer": "",
+      "charter": "",
+      "asset": "/res/s6",
+      "cover": "/res/s6/image.png"
+    },
+    {
+      "path": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/EZ",
+      "asset": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers",
+      "cover": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/image.png",
+      "name": "True Home, True World (Rework)",
+      "song": "TrueHomeTrueWorldRework.816ThreeNumbers",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.5.0",
+      "composer": "816ThreeNumbers",
+      "charter": "Backward, go backward,"
+    },
+    {
+      "path": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/HD",
+      "asset": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers",
+      "cover": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/image.png",
+      "name": "True Home, True World (Rework)",
+      "song": "TrueHomeTrueWorldRework.816ThreeNumbers",
+      "difficulty": "HD",
+      "level": "HD  Lv.11.9",
+      "composer": "816ThreeNumbers",
+      "charter": "turn back to the antemundane realm,"
+    },
+    {
+      "path": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/IN",
+      "asset": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers",
+      "cover": "/res/library/TrueHomeTrueWorldRework.816ThreeNumbers/image.png",
+      "name": "True Home, True World (Rework)",
+      "song": "TrueHomeTrueWorldRework.816ThreeNumbers",
+      "difficulty": "IN",
+      "level": "IN  Lv.15.8",
+      "composer": "816ThreeNumbers",
+      "charter": "go back to the -"
+    },
+    {
+      "path": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/EZ",
+      "asset": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft",
+      "cover": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/EZ/image.png",
+      "name": "What do you want more than a Happy ending?",
+      "song": "WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.0.5",
+      "composer": "Apo11o\\\"HALO\\\"program ft. 安月名 莉子×大瀬良あい",
+      "charter": "欢迎回到 Phigros！"
+    },
+    {
+      "path": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/HD",
+      "asset": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft",
+      "cover": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/HD/image.png",
+      "name": "What do you want more than a Happy ending?",
+      "song": "WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい",
+      "difficulty": "HD",
+      "level": "HD  Lv.11.5",
+      "composer": "Apo11o\\\"HALO\\\"program ft. 安月名 莉子×大瀬良あい",
+      "charter": "欢迎回到 Phigros！"
+    },
+    {
+      "path": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/IN",
+      "asset": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft",
+      "cover": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/IN/image.png",
+      "name": "What do you want more than a Happy ending?",
+      "song": "WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい",
+      "difficulty": "IN",
+      "level": "IN  Lv.16.1",
+      "composer": "Apo11o\\\"HALO\\\"program ft. 安月名 莉子×大瀬良あい",
+      "charter": "欢迎回到 Phigros！"
+    },
+    {
+      "path": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/AT",
+      "asset": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft",
+      "cover": "/res/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/AT/image.png",
+      "name": "What do you want more than a Happy ending?",
+      "song": "WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい",
+      "difficulty": "AT",
+      "level": "AT  Lv.17.1",
+      "composer": "Apo11o\\\"HALO\\\"program ft. 安月名 莉子×大瀬良あい",
+      "charter": "欢迎回到 Phigros！"
+    },
+    {
+      "path": "/res/library/rNFrums/EZ",
+      "asset": "/res/library/rNFrums",
+      "cover": "/res/library/rNFrums/image.png",
+      "name": "ハテ",
+      "song": "ハテ.rNFrums",
+      "difficulty": "EZ",
+      "level": "EZ  Lv.9.0",
+      "composer": "rN || Frums",
+      "charter": "the end of hope."
+    },
+    {
+      "path": "/res/library/rNFrums/HD",
+      "asset": "/res/library/rNFrums",
+      "cover": "/res/library/rNFrums/image.png",
+      "name": "ハテ",
+      "song": "ハテ.rNFrums",
+      "difficulty": "HD",
+      "level": "HD  Lv.13.9",
+      "composer": "rN || Frums",
+      "charter": "the end of ache."
+    },
+    {
+      "path": "/res/library/rNFrums/IN",
+      "asset": "/res/library/rNFrums",
+      "cover": "/res/library/rNFrums/image.png",
+      "name": "ハテ",
+      "song": "ハテ.rNFrums",
+      "difficulty": "IN",
+      "level": "IN  Lv.16.7",
+      "composer": "rN || Frums",
+      "charter": "the end of this."
+    },
+    {
+      "path": "/res/library/rNFrums/AT",
+      "asset": "/res/library/rNFrums",
+      "cover": "/res/library/rNFrums/image.png",
+      "name": "ハテ",
+      "song": "ハテ.rNFrums",
+      "difficulty": "AT",
+      "level": "AT  Lv.17.9",
+      "composer": "rN || Frums",
+      "charter": "the end of ever."
+    }
+  ]
+}

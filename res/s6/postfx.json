@@ -1,0 +1,28 @@
+{
+    "_note": "S6 后期特效数据，重建自 C9S6LevelEffect (bundle b4c1611f) 的 AnimationDirector 关键帧与各 *Settings 资源。谱面文件里没有这些数据。",
+    "_curve_semantics": "[[time, value], ...] 线性插值；第一帧之前保持首值，最后一帧之后保持末值",
+    "_shader_ref": "原版 Unity shader：PostEffects_Glitch / RGBShift / VignettePlus / ESCContol",
+    "order": ["glitch", "rgbShift", "vignettePlus", "brightness"],
+    "glitchTex": "glitch.png",
+    "curves": {
+        "glitchRange":        [[57.0, 0.0], [64.0, 0.04]],
+        "rgbShiftRadius":     [[57.0, 6.5], [64.0, 3.5]],
+        "rgbShiftDeform":     [[0.0, 0.55]],
+        "vignetteRadius":     [[57.0, 1.0], [64.0, 0.1]],
+        "vignetteSmoothness": [[57.0, 1.0], [64.0, 0.4]],
+        "vignetteDarkness":   [[0.0, 1.0]],
+        "brightness":         [[60.0, 1.0], [65.0, 0.0]]
+    },
+    "_constants": {
+        "_note": "各 *Settings 资源里未被关键帧覆盖的常量",
+        "rgbShiftCenter": [0.5, 0.5],
+        "vignetteCenter": [0.5, 0.5],
+        "vignetteLineOpacity": 0.0,
+        "vignetteNoiseBrightness": 0.0,
+        "vignetteNoiseSaturation": 0.0,
+        "contrast": 1.0,
+        "saturation": 1.0,
+        "_dead_features": "lineOpacity / noiseBrightness / noiseSaturation 在 S6 恒为 0，对应代码在关卡里不产生画面；Saturation 与 Contrast 恒为 1，ESCControl 退化成纯亮度乘算"
+    },
+    "_impl": "web 端在 WebGL 里全分辨率逐帧 ping-pong，四段效果 + 一次 copy，无降采样"
+}
