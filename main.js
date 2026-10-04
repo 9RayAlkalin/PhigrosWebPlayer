@@ -115,6 +115,14 @@ const ui = {
     loading_text: el("#loading-text")
 };
 
+// ---- 部署基址 --------------------------------------------------------------
+// 本地 `py server.py` 时 BASE === "/"；部署到 GitHub Pages（子路径
+// /PhigrosWebPlayer/）时 BASE === "/PhigrosWebPlayer/"。所有资源引用都过 R()，
+// 同一份代码在根路径和子路径下都能跑，不用为部署维护第二份。
+const BASE = new URL(".", document.baseURI).pathname;
+// 把 "/xxx"（谱面库清单里的 path / asset / cover 就是这个形式）拼到基址后面
+const R = p => BASE + String(p).replace(/^\/+/, "");
+
 const load_audio = async (url, on_progress) => {
     const resp = await fetch(url);
     // 音频要 decodeAudioData，进度按字节比例报（解码耗时算不进进度条，但解码很快）
@@ -720,7 +728,7 @@ const shader_expand = (src, seen) => src.replace(
 
 const load_shaders = async () => {
     const keys = Object.keys(SHADER_FILES);
-    const texts = await Promise.all(keys.map(k => load_text(`/shader/${SHADER_FILES[k]}`)));
+    const texts = await Promise.all(keys.map(k => load_text(R(`/shader/${SHADER_FILES[k]}`))));
     keys.forEach((k, i) => { SH[k] = texts[i]; });
     for (const k of keys) SH[k] = shader_expand(SH[k], [k]);
 };
@@ -1681,7 +1689,7 @@ const render_library = list => {
         img.className = "lib-cover";
         img.loading = "lazy";
         // 同一首歌各难度曲绘共用同一个 URL -> 浏览器只下载一次，多张卡片共用缓存
-        img.src = e.cover || `${e.path}/image.png`;
+        img.src = R(e.cover || `${e.path}/image.png`);
 
         const body = document.createElement("div");
         body.className = "lib-body";
@@ -1717,7 +1725,7 @@ const select_chart = async e => {
     ui.library_overlay.classList.add("hidden");
     ui.start_overlay.classList.add("hidden");
     try {
-        await load_chart(e.path, e.asset || e.path);
+        await load_chart(R(e.path), R(e.asset || e.path));
         chart_started = false;
         ui.start_overlay.classList.remove("hidden");
     } catch (err) {
@@ -1747,22 +1755,22 @@ window.onload = async () => {
     resize();
     window.onresize = resize;
 
-    C.click_sounds[C.note.tap] = await load_audio("/res/click.ogg");
+    C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"));
     C.click_sounds[C.note.hold] = C.click_sounds[C.note.tap];
-    C.click_sounds[C.note.drag] = await load_audio("/res/drag.ogg");
-    C.click_sounds[C.note.flick] = await load_audio("/res/flick.ogg");
+    C.click_sounds[C.note.drag] = await load_audio(R("/res/drag.ogg"));
+    C.click_sounds[C.note.flick] = await load_audio(R("/res/flick.ogg"));
 
-    C.note_imgs.click = await load_img("/res/click.png");
-    C.note_imgs.drag = await load_img("/res/drag.png");
-    C.note_imgs.hold = await load_img("/res/hold.png");
-    C.note_imgs.flick = await load_img("/res/flick.png");
+    C.note_imgs.click = await load_img(R("/res/click.png"));
+    C.note_imgs.drag = await load_img(R("/res/drag.png"));
+    C.note_imgs.hold = await load_img(R("/res/hold.png"));
+    C.note_imgs.flick = await load_img(R("/res/flick.png"));
 
-    C.note_imgs.click_mh = await load_img("/res/click_mh.png");
-    C.note_imgs.drag_mh = await load_img("/res/drag_mh.png");
-    C.note_imgs.hold_mh = await load_img("/res/hold_mh.png");
-    C.note_imgs.flick_mh = await load_img("/res/flick_mh.png");
+    C.note_imgs.click_mh = await load_img(R("/res/click_mh.png"));
+    C.note_imgs.drag_mh = await load_img(R("/res/drag_mh.png"));
+    C.note_imgs.hold_mh = await load_img(R("/res/hold_mh.png"));
+    C.note_imgs.flick_mh = await load_img(R("/res/flick_mh.png"));
 
-    C.respack_info = await load_json("/res/respack.json");
+    C.respack_info = await load_json(R("/res/respack.json"));
 
     [C.note_imgs.hold_head, C.note_imgs.hold_body, C.note_imgs.hold_tail] =
         clip_hold(C.note_imgs.hold, C.respack_info.holdAtlas);
@@ -1779,7 +1787,7 @@ window.onload = async () => {
     C.hold_body_imgs = [C.note_imgs.hold_body, C.note_imgs.hold_mh_body];
     C.hold_tail_imgs = [C.note_imgs.hold_tail, C.note_imgs.hold_mh_tail];
 
-    C.hit_fx = await load_img("/res/hit_fx.png");
+    C.hit_fx = await load_img(R("/res/hit_fx.png"));
 
     for (let j = 0; j < C.respack_info.hitFx[1]; j++) {
         for (let i = 0; i < C.respack_info.hitFx[0]; i++) {
@@ -1796,13 +1804,13 @@ window.onload = async () => {
     }
 
     // _DisplaceMap = BlockNoise1.png、_SparkMap = PointNoise.png，都只取 .r 通道
-    C.block.imgs.displace = await load_img("/res/BlockNoise1.png");
-    C.block.imgs.spark = await load_img("/res/PointNoise.png");
+    C.block.imgs.displace = await load_img(R("/res/BlockNoise1.png"));
+    C.block.imgs.spark = await load_img(R("/res/PointNoise.png"));
 
     // 着色器必须先就位：fx_init 在第一次 apply_postfx 时才惰性编译
     await load_shaders();
 
-    const lib_manifest = await load_json_or_null("/res/library/index.json");
+    const lib_manifest = await load_json_or_null(R("/res/library/index.json"));
     if (lib_manifest && Array.isArray(lib_manifest.charts) && lib_manifest.charts.length > 0) {
         render_library(lib_manifest.charts);
         const s6 = lib_manifest.charts.find(e => 
@@ -1812,7 +1820,7 @@ window.onload = async () => {
         open_library();
         await select_chart(s6);
     } else {
-        await load_chart("/res/s6");
+        await load_chart(R("/res/s6"));
         ui.library_count.textContent = "未导入：py import_library.py";
         ui.start_overlay.classList.remove("hidden");
     }
