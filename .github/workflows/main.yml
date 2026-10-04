@@ -22,20 +22,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
+
+      # actions/upload-pages-artifact 只接受「一个」目录，它内部执行的是
+      #   tar --directory "$INPUT_PATH" ... .
+      # 所以不能传多行列表（index.html / main.js / res/ / shader/）：
+      # 那样 $INPUT_PATH 会变成一个含换行的参数，tar 报
+      #   "index.html\nmain.js\nres/\nshader/: Cannot open: No such file or directory"
+      # 并以退出码 2 结束（v3/v4/v5 都一样，升版本救不了，只能改写法）。
+      # 先把要发布的东西汇总进 _site/，再整目录上传。
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          cp -a index.html main.js res shader _site/
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
-          path: |
-            index.html
-            main.js
-            res/
-            shader/
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
