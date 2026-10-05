@@ -193,6 +193,135 @@ const load_json_or_null = async url => {
     }
 };
 
+/* ---------------- 首玩异象资源装载 ---------------- */
+
+/* WireNoise：原版是 Texture2DArray（R8，1024x1024 共 11 层），
+   导出时切成 wirenoise_00..10.png。WebGL2 下拼成真正的 2DArray 上传；
+   WebGL1 没有 sampler2DArray，只绑第 0 层（噪声不演化，其余观感保留）。 */
+const fx_load_wirenoise = async (F, layers) => {
+    const gl = F.gl;
+    const imgs = [];
+    for (let i = 0; i < layers; i++)
+        imgs.push(await load_img(R(`/res/effects/wirenoise_${String(i).padStart(2, "0")}.png`)));
+
+    if (F.caps.has_texpack) {
+        const w = imgs[0].naturalWidth, h = imgs[0].naturalHeight;
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, F.wireNoise);
+        // ★ R8 单通道的行对齐：宽度 1024 是 4 的倍数，UNPACK_ALIGNMENT=1 仍最稳
+        //   （某些实现对 RED/UNSIGNED_BYTE 的组合要求显式指定，否则 texSubImage3D
+        //    会报 INVALID_OPERATION=1282）。
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, w, h, layers.length, 0,
+                      gl.RED, gl.UNSIGNED_BYTE, null);
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d", { willReadFrequently: true });
+        const r8 = new Uint8Array(w * h);
+        for (let i = 0; i < layers.length; i++) {
+            ctx.clearRect(0, 0, w, h);
+            ctx.drawImage(imgs[i], 0, 0);
+            const px = ctx.getImageData(0, 0, w, h).data;
+            // PNG 是 RGBA，噪声在哪个通道不确定；取三通道最大值最稳
+            for (let k = 0, n = w * h; k < n; k++) {
+                const o = k * 4;
+                r8[k] = Math.max(px[o], px[o + 1], px[o + 2]);
+            }
+            gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1,
+                             gl.RED, gl.UNSIGNED_BYTE, r8);
+        }
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);   // 复原，别影响后面的 2D 上传
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        F.noise_texel = [1 / w, 1 / h];
+    } else {
+        gl.bindTexture(gl.TEXTURE_2D, F.wireNoise);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imgs[0]);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        F.noise_texel = [1 / imgs[0].naturalWidth, 1 / imgs[0].naturalHeight];
+    }
+};
+
+/* 载入某个异象（res/effects/<name>.json）及其贴图，存到 C.fx_eff。
+   ★ load_chart 跑的时候 C.fx 可能还没初始化（fx_init 是首次渲染时才懒初始化的），
+     所以这里自己确保一次 —— 否则首屏选谱时异象会静默不生效。 */
+const fx_load_anomaly = async (name) => {
+    if (!C.fx) {
+        try {
+            C.fx = fx_init();
+        } catch (e) {
+            C.fx = null;
+            C.fx_failed = true;
+            console.error("异象载入时 WebGL 初始化失败：", e);
+            return false;
+        }
+        // 不用在这里设尺寸：apply_postfx 每帧会按需重建 RT（见 C.fx.w !== w 分支）
+    }
+    const F = C.fx;
+    if (!F) return false;
+    const eff = await load_json_or_null(R(`/res/effects/${name}.json`));
+    if (!eff) return false;
+
+    const gl = F.gl;
+    eff._frozen = false;
+
+    // GlitchDog 的两张图（三首共用）
+    const gd = [await load_img(R("/res/effects/glitchdog_glitchmap.png")),
+                await load_img(R("/res/effects/glitchdog_displace.png"))];
+    gl.bindTexture(gl.TEXTURE_2D, F.glitchDogGlitchMap);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, gd[0]);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, F.glitchDogDisplace);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, gd[1]);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    // WireNoise 只 DS 用得到（11 层）。无 WebGL2 时 GlitchDog 根本不跑，
+    // 也就没必要下载这 2.8MB。
+    if (eff.settings.glitchDog && F.caps.has_texpack) {
+        const frames = (eff.settings.glitchDog.static || {}).noiseFrameCount || 11;
+        await fx_load_wirenoise(F, Math.round(frames));
+    } else {
+        /* 不用 wireNoise 的曲子（Message/ハテ）什么都不用做 ——
+           GlitchDog 那条 pass 会整个跳过，shader 不会被编译进来采样这张纹理。
+           ★ 别在这里 "占位分配" 一下：对一张已经用 texImage3D 初始化过的
+             2DArray 纹理再调 texImage3D（哪怕同尺寸）会报 INVALID_OPERATION(1282)。
+             只把 noise_texel 复位，让没有该字段的场合有合理默认值。 */
+        F.noise_texel = [1, 1];
+    }
+
+    // kaleido 的两张图（只有 Message 有）
+    if (eff.kaleido_static) {
+        const kn = await load_img(R("/res/effects/kaleido_normal.png"));
+        const kt = await load_img(R("/res/effects/kaleido_col.png"));
+        gl.bindTexture(gl.TEXTURE_2D, F.kaleidoNormal);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, kn);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.bindTexture(gl.TEXTURE_2D, F.kaleidoTrans);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, kt);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    }
+
+    // DS 网格（Hidden/DsGrid 的 _MainTex = FrameBase_0，材质里平铺 10x10）
+    if ((eff.imageTargets || []).some(x => x.target === "grid")) {
+        const gt = await load_img(R("/res/effects/dsgrid_main.png"));
+        gl.bindTexture(gl.TEXTURE_2D, F.gridTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, gt);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    }
+
+    C.fx_eff = eff;
+    return true;
+};
+
 const clip_img = (img, y0, y1) => {
     const tempcv = document.createElement("canvas");
     tempcv.width = img.width;
@@ -410,6 +539,67 @@ const curve_val = (keys, t) => {
         }
     }
     return last[1];
+};
+
+/* ---------------- 首玩异象：AnimationDirector 求值器 ----------------
+   逐条对应 AnimationDirector.Evaluate @0x1D2B680（见 _analysis\resolve_effect_params.py）：
+     跨过 endTime 取末帧 -> 跨过首帧之前取首帧的 endValue -> 线性找区间 ->
+     p = (t - cur.time) / span -> easeType 15 走 AnimationCurve(Hermite)，否则查 ease 表 ->
+     ★ 结果 clamp 到 [0,1]（游戏侧 fminf + <0 归零）-> start + ep*(end - start)
+
+   ★ 切线直接用序列化的 inSlope/outSlope，**不**按 weightedMode/weight 重算：
+     全项目 161 对加权段穷举 9 种加权公式最高仅 3/161 匹配，且无权重信息的
+     10009 对用序列化切线求值形态正常（详见 HANDOFF §12.2）。 */
+
+const hermite_curve_eval = (curve, t) => {
+    if (!curve || !curve.length) return 0;
+    if (curve.length === 1) return curve[0][1];
+    if (t <= curve[0][0]) return curve[0][1];
+    if (t >= curve[curve.length - 1][0]) return curve[curve.length - 1][1];
+
+    let i = 0;
+    while (i + 1 < curve.length - 1 && curve[i + 1][0] < t) i++;
+    const a = curve[i], b = curve[i + 1];
+    const dt = b[0] - a[0];
+    if (dt <= 0) return a[1];
+
+    const s = (t - a[0]) / dt;
+    const s2 = s * s, s3 = s2 * s;
+    // a[2] = outSlope（出切线），b[3] = inSlope（入切线）
+    return (2 * s3 - 3 * s2 + 1) * a[1] + (s3 - 2 * s2 + s) * dt * a[2]
+         + (-2 * s3 + 3 * s2) * b[1] + (s3 - s2) * dt * b[3];
+};
+
+/* keys = res/effects/*.json 里压缩过的曲线：
+   [time, startValue, endValue, easeType, curve|null] */
+const director_eval = (keys, t) => {
+    if (!keys || !keys.length) return 0;
+    if (keys[0][0] > t) return keys[0][2];          // 首帧之前取首帧 endValue
+    const n = keys.length;
+    let i = 0;
+    while (i < n - 1 && keys[i + 1][0] <= t) i++;
+    const cur = keys[i];
+    if (i === n - 1) return cur[2];                 // 末帧之后保持末值
+    const span = keys[i + 1][0] - cur[0];
+    if (span <= 0) return cur[2];
+    const p = (t - cur[0]) / span;
+
+    const et = cur[3];
+    let ep = (et === 15) ? hermite_curve_eval(cur[4], p) : ease(p, et);
+    ep = ep < 0 ? 0 : (ep > 1 ? 1 : ep);             // ★ 游戏侧 clamp
+    return cur[1] + ep * (keys[i + 1][2] - cur[1]);
+};
+
+/* 一个已载入的异象定义（C.fx.eff）：曲线 + 静态默认值 + 时间闸。 */
+const eff_ev = (eff, name, t) => director_eval(eff.curves[name], t);
+
+/* 取某 settings 对象在 t 时刻的完整字段值：静态打底，被驱动的用曲线覆盖。 */
+const eff_settings = (eff, obj, t) => {
+    const d = eff.settings[obj];
+    if (!d) return null;
+    const st = Object.assign({}, d.static);
+    for (const f in d.driven) st[f] = eff_ev(eff, d.driven[f], t);
+    return st;
 };
 
 // 方块事件是按 time 的关键帧（没有 endTime），起点是上一个关键帧的值。
@@ -697,14 +887,37 @@ const render_blocks = (sctx, t) => {
      block_cov.frag    ≈ Unlit/BlockCompose
      block_layers.frag ≈ Unlit/DisabledBlock（加法层，烘进场景）
      block_ring.frag   ≈ Unlit/EdgeMask + Unlit/GlowMask
-     block_apply.frag  ≈ Unlit/ActiveBlock / ReadyBlock（disabled 由 block_layers 接管） */
+     block_apply.frag  ≈ Unlit/ActiveBlock / ReadyBlock（disabled 由 block_layers 接管）
+
+     首玩异象四件套（Chapter9 baseline 的 LevelEffects，原版 HLSLCC 产物见
+     _analysis\shader_blob_c9_clean\）：
+     glitchdog.frag        ≈ PostEffects/GlitchDog（DS 核心 pass，26 uniform）
+     dimensionslash.frag   ≈ PostEffects/DimensionSlash（DS 的 5 条切口）
+     lightband.frag        ≈ PostEffects/LightBand（Message 横向光带）
+     kaleidoblackmask.frag ≈ Hidden/KaleidoBlackMask（Message 万花筒材质）
+     blendmask.frag        ≈ blackMask UI Image（黑幕，bgAlpha 驱动）
+     dsgrid.frag           ≈ Hidden/DsGrid（DS 背景网格，加法；真身见 shader_blob_c9）
+     composeover.frag      note 层 alpha-over 合回背景层（分层渲染专用） */
 const SHADER_FILES = {
     fx_vs:       "fx.vert",
+    // ES 3.00 版（GlitchDog 要 sampler2DArray，只能在 WebGL2 上跑，
+    // 且 ES 1.00/3.00 的 shader 不能混用，所以 vertex 也要配一份）
+    fx30_vs:     "fx30.vert",
     glitch:      "glitch.frag",
     rgbShift:    "rgbshift.frag",
     vignette:    "vignette.frag",
     esc:         "esc.frag",
     copy:        "copy.frag",
+    // 首玩异象
+    glitchDog:   "glitchdog.frag",
+    dimSlash:    "dimensionslash.frag",
+    lightBand:   "lightband.frag",
+    kaleido:     "kaleidoblackmask.frag",
+    blendMask:   "blendmask.frag",
+    dsGrid:      "dsgrid.frag",
+    overCompose: "composeover.frag",
+    bloom:       "bloom.frag",
+    lensDist:    "lensdistortion.frag",
     block_disp:  "block_disp.glsl",
     // 顺序有讲究：load_shaders 按下标顺序展开 #include，block_layers 里有
     // `#include "block_disp"`，排到 block_disp 前面会抛「shader include 找不到」
@@ -742,9 +955,19 @@ const fx_compile = (gl, type, src) => {
     return s;
 };
 
-const fx_program = (gl, fs_src) => {
+/* defines = 注入 fragment shader 顶部的宏（如 FX_HAS_DERIV）。
+   vs_key = 换 vertex shader（ES 3.00 的 shader 必须配 ES 3.00 的 vertex）。
+
+   ★ ES 3.00 的 shader 首行必须是 `#version 300 es`，任何东西都不能加在它前面
+     （包括 #define），所以有 defines 时只允许用于 ES 1.00 的 shader。 */
+const fx_program = (gl, fs_src, defines, vs_key) => {
+    if (defines && defines.length) {
+        if (/^\s*#version/.test(fs_src))
+            throw new Error("ES 3.00 shader 不能注入 #define（#version 必须在首行）");
+        fs_src = defines.map(d => `#define ${d}\n`).join("") + fs_src;
+    }
     const p = gl.createProgram();
-    gl.attachShader(p, fx_compile(gl, gl.VERTEX_SHADER, SH.fx_vs));
+    gl.attachShader(p, fx_compile(gl, gl.VERTEX_SHADER, SH[vs_key || "fx_vs"]));
     gl.attachShader(p, fx_compile(gl, gl.FRAGMENT_SHADER, fs_src));
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS))
@@ -771,8 +994,21 @@ const fx_init = () => {
         alpha: false, depth: false, stencil: false, antialias: false,
         premultipliedAlpha: false, preserveDrawingBuffer: true
     };
-    const gl = canvas.getContext("webgl2", opts) || canvas.getContext("webgl", opts);
+    const gl2 = canvas.getContext("webgl2", opts);
+    const gl = gl2 || canvas.getContext("webgl", opts);
     if (!gl) return null;
+
+    /* 异象 shader 的可选能力探测：
+       has_texpack —— GlitchDog 的 _WireNoiseArray 是 sampler2DArray，
+                      ES 3.00（WebGL2）才有；ES 1.00 里没这个类型，
+                      所以拿不到 WebGL2 就整个 GlitchDog program 都不编译。
+       has_deriv   —— DimensionSlash 需要屏幕空间导数。
+                      ★ ES 3.00 里 dFdx/dFdy 是**内建**的（不需要扩展，
+                        在 ES 3.00 上下文里 getExtension 反而返回 false）；
+                      ES 1.00 才需要 OES_standard_derivatives。 */
+    const has_texpack = !!gl2;
+    const has_deriv = has_texpack || !!gl.getExtension("OES_standard_derivatives");
+    const glsl_defs = has_deriv ? ["FX_HAS_DERIV"] : [];
 
     const mk_tex = (repeat, nearest) => {
         const t = gl.createTexture();
@@ -814,8 +1050,22 @@ const fx_init = () => {
            线性过滤会把 256² 的噪声抹平，方块边缘就变成平滑的扭动（扭曲），
            拿不到原版那种逐像素碎裂的边（细碎）。 */
         displace: mk_tex(true, true), spark: mk_tex(false, true),
+        /* 首玩异象的贴图。默认 1x1 白/黑占位，载入真实资源后覆盖。
+           ★ wireNoise 必须用 gl.createTexture() 单独建 —— 它要绑到
+             TEXTURE_2D_ARRAY 目标上传 2DArray，不能复用 mk_tex() 建的
+             TEXTURE_2D 纹理（拿 2D 纹理绑 ARRAY 目标会 INVALID_OPERATION=1282）。 */
+        glitchDogGlitchMap: mk_tex(false, false),
+        glitchDogDisplace: mk_tex(false, false),
+        wireNoise: (() => { const t = gl.createTexture(); return t; })(),
+        kaleidoNormal: mk_tex(false, false),
+        kaleidoTrans: mk_tex(false, false),
+        /* 分层渲染（异象）：fg = note 层画布上传的目标（背景层在 tex[0/1] 里 ping-pong，
+           合成一趟 base+over 需要第三张纹理）；gridTex = DS 网格的 _MainTex(FrameBase_0)。 */
+        fg: mk_tex(false, false),
+        gridTex: mk_tex(false, false),
         fbo: gl.createFramebuffer(),
         w: 0, h: 0,
+        caps: { has_texpack, has_deriv, is_gl2: !!gl2 },
         prog: {
             glitch: fx_program(gl, SH.glitch),
             rgbShift: fx_program(gl, SH.rgbShift),
@@ -825,7 +1075,19 @@ const fx_init = () => {
             bLayers: fx_program(gl, SH.block_layers),
             bCov: fx_program(gl, SH.block_cov),
             bRing: fx_program(gl, SH.block_ring),
-            bApply: fx_program(gl, SH.block_apply)
+            bApply: fx_program(gl, SH.block_apply),
+            // 异象四个。glitchDog / dimSlash 是 ES 3.00（前者要 sampler2DArray，
+            // 后者用内建 dFdx/bias），只在 WebGL2 上编译，配套 fx30_vs。
+            // 没有 WebGL2 时它们是 null，fx_render_anomaly 会跳过该 pass。
+            glitchDog: has_texpack ? fx_program(gl, SH.glitchDog, null, "fx30_vs") : null,
+            dimSlash: has_texpack ? fx_program(gl, SH.dimSlash, null, "fx30_vs") : null,
+            lightBand: fx_program(gl, SH.lightBand),
+            kaleido: fx_program(gl, SH.kaleido),
+            blendMask: fx_program(gl, SH.blendMask),
+            dsGrid: fx_program(gl, SH.dsGrid),
+            over: fx_program(gl, SH.overCompose),
+            bloom: fx_program(gl, SH.bloom),
+            lensDist: fx_program(gl, SH.lensDist)
         }
     };
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -838,6 +1100,15 @@ const fx_init = () => {
 const fx_bind = (gl, unit, tex, loc) => {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (loc) gl.uniform1i(loc, unit);
+};
+
+/* 绑 sampler2DArray（GlitchDog 的 _WireNoiseArray）。
+   ★ 不能用 fx_bind：它硬编码 bindTexture(TEXTURE_2D)，而 array 纹理必须绑到
+     TEXTURE_2D_ARRAY 目标，否则采样时 INVALID_OPERATION(1282)。 */
+const fx_bind_array = (gl, unit, tex, loc) => {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     if (loc) gl.uniform1i(loc, unit);
 };
 
@@ -1029,14 +1300,372 @@ const glitch_dirs = t => {
     };
 };
 
-const fx_render = (src_canvas, t) => {
+/* ---------------- 首玩异象渲染 ----------------
+   pass 顺序 = *LevelEffects.prefab 里各 settings 字段的声明顺序，
+   因为 PostProcessingManager.OnRenderImage @0x1DBD01C 按 postEffects 列表
+   依次执行，而运行时该列表由 LevelEffects 按字段序填入
+   （实测见 _analysis\postfx_pass_order.txt：Hate prefab 的顺序是
+     Glitch -> ESCContol -> VignettePlus -> RGBShift -> LensDistortion）。
+   各曲线的求值统一走上面的 director_eval（ease 表 / Hermite / clamp）。 */
+
+/* GlitchDog：DS 的核心 pass。需要 displaceMap / glitchMap / wireNoise 三张图。 */
+const fx_pass_glitchdog = (F, cur, eff, t, st) => {
+    const g = F.gl;
+    /* settings 里的向量是 Unity YAML 的字典：scale 系列 {x,y}、颜色 {r,g,b,a}。
+       这里曾按数组 [0] 取 —— undefined 传进 uniform 就是 NaN，shader 里
+       tint/uv 全变 NaN ⇒ fragColor 全黑 ⇒ DS 整屏黑。现在按字典取，
+       同时兼容数组（万一以后手写 JSON 用数组）。 */
+    const xy = (v, d) => (v && v.x !== undefined) ? [v.x, v.y] : (Array.isArray(v) ? v : d);
+    const rgb = (v, d) => (v && v.r !== undefined) ? [v.r, v.g, v.b] : (Array.isArray(v) ? v : d);
+    const cm = xy(st.glitchMapScale, [1, 1]);
+    const ds = xy(st.displaceMapScale, [1, 1]);
+    const ns = xy(st.noiseScale, [1, 1]);
+    const no = xy(st.noiseOffset, [0, 0]);
+    const dof = xy(st.displaceMapOffset, [0, 0]);
+    const gmo = xy(st.glitchMapOffset, [0, 0]);
+    const cc = rgb(st.centerColor, [0, 0, 0]);
+    const ec = rgb(st.edgeColor, [0, 0, 0]);
+    fx_pass(F.prog.glitchDog, F.tex[1 - cur], (p, gl) => {
+        fx_bind(gl, 0, F.tex[cur], p.loc.u_src);
+        fx_bind(gl, 1, F.glitchDogDisplace, p.loc.u_displaceMap);
+        fx_bind(gl, 2, F.glitchDogGlitchMap, p.loc.u_glitchMap);
+        if (F.caps.has_texpack) fx_bind_array(gl, 3, F.wireNoise, p.loc.u_wireNoise);
+        gl.uniform4f(p.loc.u_time, t, t, 0, 0);
+        gl.uniform2f(p.loc.u_noiseTexelSize,
+                     F.noise_texel ? F.noise_texel[0] : 1, F.noise_texel ? F.noise_texel[1] : 1);
+        gl.uniform1f(p.loc.u_noiseFrameCount, st.noiseFrameCount ?? 11);
+        gl.uniform1f(p.loc.u_noiseMoveSpeed, st.noiseMoveSpeed ?? 0);
+        gl.uniform1f(p.loc.u_noiseEvolveSpeed, st.noiseEvolveSpeed ?? 0);
+        gl.uniform2f(p.loc.u_noiseScale, ns[0], ns[1]);
+        gl.uniform2f(p.loc.u_noiseOffset, no[0], no[1]);
+        gl.uniform1f(p.loc.u_seamBlend, st.seamBlend ?? 0.02);
+        gl.uniform1f(p.loc.u_centerMaskRadius, st.centerMaskRadius ?? 0.094);
+        gl.uniform1f(p.loc.u_centerMaskSmooth, st.centerMaskSmoothness ?? 0.07);
+        gl.uniform1f(p.loc.u_edgeMaskRadius, st.edgeMaskRadius ?? 0.12);
+        gl.uniform1f(p.loc.u_edgeMaskSmooth, st.edgeMaskSmoothness ?? 0.41);
+        gl.uniform1f(p.loc.u_displaceStrength, st.displaceStrength ?? 0.2);
+        gl.uniform2f(p.loc.u_displaceMapOffset, dof[0], dof[1]);
+        gl.uniform2f(p.loc.u_displaceMapScale, ds[0], ds[1]);
+        gl.uniform1f(p.loc.u_displaceSpeed, st.displaceSpeed ?? 1);
+        gl.uniform1f(p.loc.u_glitchMapBright, st.glitchMapBrightness ?? 0);
+        gl.uniform1f(p.loc.u_glitchMapContrast, st.glitchMapContrast ?? 3.5);
+        gl.uniform2f(p.loc.u_glitchMapOffset, gmo[0], gmo[1]);
+        gl.uniform2f(p.loc.u_glitchMapScale, cm[0], cm[1]);
+        gl.uniform3f(p.loc.u_centerColor, cc[0], cc[1], cc[2]);
+        gl.uniform3f(p.loc.u_edgeColor, ec[0], ec[1], ec[2]);
+        gl.uniform1f(p.loc.u_colorBlend, st.colorBlend ?? 0.776);
+    });
+    return 1 - cur;
+};
+
+/* DimensionSlash：5 条切口。几何来自 slashes（取 time<=t 的最后一条）。 */
+const fx_pass_dimslash = (F, cur, eff, t) => {
+    const pos = new Float32Array(10), nrm = new Float32Array(10),
+          off = new Float32Array(10), str = new Float32Array(5);
+    let count = 0;
+    const sl = eff.slashes || {};
+    const order = Object.keys(sl).sort();
+    for (const name of order) {
+        const infos = sl[name] || [];
+        let geo = null;
+        for (const inf of infos) if (inf.time <= t) geo = inf; else break;
+        const strength = eff_ev(eff, name + "Strength", t);
+        if (!geo || strength <= 0) continue;
+        // pos = (x, y, 0, 0)；normal = 由 lineDir 转的单位向量；offset = 由 slashDir
+        pos[count * 2] = geo.pos ? geo.pos.x : 0;
+        pos[count * 2 + 1] = geo.pos ? geo.pos.y : 0;
+        nrm[count * 2] = Math.cos(geo.lineDir || 0);
+        nrm[count * 2 + 1] = Math.sin(geo.lineDir || 0);
+        off[count * 2] = Math.cos(geo.slashDir || 0);
+        off[count * 2 + 1] = Math.sin(geo.slashDir || 0);
+        str[count] = strength;
+        count++;
+        if (count >= 5) break;
+    }
+    const st = eff_settings(eff, "dimensionSlash", t) || {};
+    const lc = st.slashLightColor || [1, 1, 1];
+    fx_pass(F.prog.dimSlash, F.tex[1 - cur], (p, g) => {
+        fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        g.uniform2fv(p.loc.u_slashPos, pos);
+        g.uniform2fv(p.loc.u_slashNormal, nrm);
+        g.uniform2fv(p.loc.u_slashOffset, off);
+        g.uniform1fv(p.loc.u_slashStrength, str);
+        g.uniform1i(p.loc.u_slashCount, count);
+        g.uniform1f(p.loc.u_lightStrength, st.slashLightStrength ?? 1);
+        g.uniform1f(p.loc.u_lightFalloff, st.slashLightFalloff ?? 10);
+        g.uniform3f(p.loc.u_lightColor, lc[0], lc[1], lc[2]);
+    });
+    return 1 - cur;
+};
+
+/* LightBand：Message 的横向光带。
+   ★ bandNormal 不在 settings 里（LightBandSettings 只有 bandPos/bandDir/bandWidth/
+     bandSmoothness/bandBrightness，见 dump.cs TypeDefIndex 4101），它是
+     SetMaterialData 每帧用 bandDir（弧度）算出来的单位法线：
+         _BandNormal = (cos(bandDir), sin(bandDir))
+     prefab 里 bandDir = 0 ⇒ 法线 = (1, 0)，即光带是**竖直**的一条（沿 x 方向的法线
+     ⇒ 沿 y 方向延伸）。别写成 (0,1)，那会把光带转 90 度。 */
+const fx_pass_lightband = (F, cur, eff, t) => {
+    const st = eff_settings(eff, "lightBand", t) || {};
+    const bp = st.bandPos || { x: 0.5, y: 0.5 };
+    const dir = st.bandDir ?? 0;
+    fx_pass(F.prog.lightBand, F.tex[1 - cur], (p, g) => {
+        fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        g.uniform2f(p.loc.u_bandPos, bp.x, bp.y);
+        g.uniform2f(p.loc.u_bandNormal, Math.cos(dir), Math.sin(dir));
+        g.uniform1f(p.loc.u_bandWidth, st.bandWidth ?? 0);
+        g.uniform1f(p.loc.u_bandSmooth, st.bandSmoothness ?? 0);
+        g.uniform1f(p.loc.u_bandBright, st.bandBrightness ?? 1);
+    });
+    return 1 - cur;
+};
+
+/* KaleidoBlackMask：Message 的万花筒材质。mixStrength 由 kaleidoMix 曲线驱动。 */
+const fx_pass_kaleido = (F, cur, eff, t) => {
+    const mix = eff_ev(eff, "kaleidoMix", t);
+    const st = eff.kaleido_static || {};
+    const nst = st.normalST || [1, 1, 0, 0];
+    const tst = st.transST || [1, 1, 0, 0];
+    fx_pass(F.prog.kaleido, F.tex[1 - cur], (p, g) => {
+        fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        fx_bind(g, 1, F.kaleidoNormal, p.loc.u_normal);
+        fx_bind(g, 2, F.kaleidoTrans, p.loc.u_transMap);
+        g.uniform4f(p.loc.u_time, t, t, 0, 0);
+        g.uniform2f(p.loc.u_normalST, nst[0], nst[1]);
+        g.uniform2f(p.loc.u_normalSTOff, nst[2] || 0, nst[3] || 0);
+        g.uniform2f(p.loc.u_transST, tst[0], tst[1]);
+        g.uniform2f(p.loc.u_transSTOff, tst[2] || 0, tst[3] || 0);
+        g.uniform1f(p.loc.u_normalStrength, st.normalStrength ?? 1);
+        g.uniform2f(p.loc.u_normalMoveDir,
+                    (st.normalMoveDir || [1, 0])[0], (st.normalMoveDir || [1, 0])[1]);
+        g.uniform1f(p.loc.u_normalMoveSpeed, st.normalMoveSpeed ?? 0);
+        g.uniform2f(p.loc.u_transMoveDir,
+                    (st.transMoveDir || [1, 0])[0], (st.transMoveDir || [1, 0])[1]);
+        g.uniform1f(p.loc.u_transMoveSpeed, st.transMoveSpeed ?? 0);
+        g.uniform1f(p.loc.u_colorHueShift, st.colorHueShift ?? 0);
+        g.uniform1f(p.loc.u_colorContrast, st.colorContrast ?? 1);
+        g.uniform1f(p.loc.u_colorSaturation, st.colorSaturation ?? 1);
+        g.uniform1f(p.loc.u_colorMixStrength, mix);
+        g.uniform1f(p.loc.u_centerMaskRadius, st.centerMaskRadius ?? 0.5);
+        g.uniform1f(p.loc.u_centerMaskSmooth, st.centerMaskSmoothness ?? 0.5);
+    });
+    return 1 - cur;
+};
+
+/* 统一约定：所有 fx_pass_* 助手返回「下一个可写的槽」。
+   cur 是**当前画面所在的槽**，输出写到 F.tex[1-cur]，所以跑完一个 pass 后
+   下一个可写槽就是 1-cur。被跳过的 pass（continue）不改变 cur。 */
+const fx_pass_blackmask = (F, cur, eff, t) => {
+    const it = (eff.imageTargets || []).find(x => x.target === "blackMask");
+    if (!it) return cur;
+    const a = eff_ev(eff, it.a_from, t);
+    if (a <= 0) return cur;
+    fx_pass(F.prog.blendMask, F.tex[1 - cur], (p, g) => {
+        fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        g.uniform4f(p.loc.u_rgba, it.rgb[0], it.rgb[1], it.rgb[2], a);
+    });
+    return 1 - cur;
+};
+
+/* Hidden/DsGrid：DS 背景网格，加法合成（Blend SrcAlpha/One，见 dsgrid.frag 头注释）。
+   常数取自 DesultorySignals_Grid.mat；gridOpacity 曲线在 res/effects/desultorysignals.json。
+   freeze：原版在 nowTime>=freezeTime 时一次性 SetFloat(_GridScaleSpeed,0) 把脉冲定格；
+   这里按状态谓词喂 0（与 glitchDog 的 freeze 谓词一致，往回 seek 自动还原）。 */
+const fx_pass_grid = (F, cur, eff, t) => {
+    const a = eff_ev(eff, "gridOpacity", t);
+    if (a <= 0) return cur;
+    const ft = eff.scalars ? eff.scalars.freezeTime : null;
+    const frozen = ft !== null && ft !== undefined && t >= ft;
+    fx_pass(F.prog.dsGrid, F.tex[1 - cur], (p, g) => {
+        fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        fx_bind(g, 1, F.gridTex, p.loc.u_mainTex);
+        g.uniform2f(p.loc.u_mainTexST, 10, 10);
+        g.uniform3f(p.loc.u_gridColor, 0.8066038, 0.990657, 1);
+        g.uniform3f(p.loc.u_bloomColor, 0.514151, 0.5749958, 1);
+        g.uniform1f(p.loc.u_gridBright, 0.57);
+        g.uniform1f(p.loc.u_bloomBright, 0.59);
+        g.uniform1f(p.loc.u_scaleSpeed, frozen ? 0 : 1);
+        g.uniform1f(p.loc.u_time, t);
+        g.uniform1f(p.loc.u_opacity, a);
+    });
+    return 1 - cur;
+};
+
+/* 背景层效果：黑幕 → kaleido → 网格。
+   ★ 原版这三样全挂在 effect Canvas（SortingLayer=Background、ScreenSpaceCamera）
+     的 Image 上，画在判定线/note **之下**（层级见 _analysis\_hier_dump.txt：
+     Message/Hate 只有 BlackMask 一个孩子、DS 只有 Grid）——
+     所以它们必须作用在「只有曲绘的背景画布」上，再把 note 层盖回来，
+     而不是糊在整个已合成的帧上（否则 Message bgAlpha≡1 会把 note 一起染黑）。
+   Message 的 BlackMask Image 挂着 kaleidoMat（kaleido 就是黑幕那一笔），
+   bgAlpha≡1 时黑幕先铺黑、kaleido 再整幅替换成 outc*mask，合成结果与原版一致。 */
+const fx_layer_bg = (F, cur, eff, t) => {
+    cur = fx_pass_blackmask(F, cur, eff, t);
+    if (eff.kaleido_static) cur = fx_pass_kaleido(F, cur, eff, t);
+    if ((eff.imageTargets || []).some(x => x.target === "grid")) cur = fx_pass_grid(F, cur, eff, t);
+    return cur;
+};
+
+/* 主调度：按各曲线的 prefab 字段顺序跑一遍。
+   常规效果（glitch / rgbShift / vignette / esc）复用已有 shader，
+   异象专有的四个走各自的移植版。
+   ★ 黑幕/kaleido/网格不在这里跑 —— 它们属于背景层，在 fx_layer_bg 里
+     （note 层合成之前）执行；order 数组里残留的 "kaleido" 条目没有对应
+     case，落到空分支被忽略（order 保留原样 = prefab 字段声明序的记录）。 */
+const fx_render_anomaly = (F, cur, eff, t) => {
+    const gl = F.gl;
+    const S = eff.settings;
+
+    // 黑幕以前在这里整帧糊一刀（bgAlpha≡1 的 Message 会把 note 一起染黑）；
+    // 现在挪进 fx_layer_bg，在 note 层合成之前作用于背景画布。
+
+    // 每首的顺序来自 *_LevelEffects.prefab 的字段声明序（见文件头注释）
+    const order = eff.order;
+    for (const obj of order) {
+        /* glitchDog / dimSlash 是 ES 3.00 shader，无 WebGL2 时没编译出来
+           （program 为 null），整条 pass 跳过，其余照常跑。 */
+        const pj = F.prog[{ glitchDog: "glitchDog", dimSlash: "dimSlash" }[obj]];
+        if ((obj === "glitchDog" || obj === "dimensionSlash") && !pj) continue;
+        switch (obj) {
+            case "glitch": {
+                const st = eff_settings(eff, "glitch", t) || {};
+                const range = st.glitchRange ?? 0;
+                if (range <= 0) continue;
+                const gd = glitch_dirs(t);
+                fx_pass(F.prog.glitch, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    fx_bind(g, 1, F.noise, p.loc.u_noise);
+                    g.uniform1f(p.loc.u_range, range);
+                    g.uniform3f(p.loc.u_dirA, gd.A[0], gd.A[1], gd.A[2]);
+                    g.uniform3f(p.loc.u_dirB, gd.B[0], gd.B[1], gd.B[2]);
+                    g.uniform3f(p.loc.u_dirC, gd.C[0], gd.C[1], gd.C[2]);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "rgbShift": {
+                const st = eff_settings(eff, "rgbShift", t) || {};
+                const c = st.center || { x: 0.5, y: 0.5 };   // Unity YAML 是 {x:,y:}
+                fx_pass(F.prog.rgbShift, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    g.uniform1f(p.loc.u_radius, st.radius ?? 0);
+                    g.uniform1f(p.loc.u_deform, st.screenDeform ?? 0.45);
+                    g.uniform2f(p.loc.u_center, c.x, c.y);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "vignettePlus": {
+                const st = eff_settings(eff, "vignettePlus", t) || {};
+                const c = st.center || { x: 0.5, y: 0.5 };
+                fx_pass(F.prog.vignette, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    g.uniform1f(p.loc.u_radius, st.radius ?? 1);
+                    g.uniform1f(p.loc.u_smooth, st.smoothness ?? 1);
+                    g.uniform1f(p.loc.u_darkness, st.darkness ?? 1);
+                    g.uniform2f(p.loc.u_center, c.x, c.y);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "colorBalance": {
+                const st = eff_settings(eff, "colorBalance", t) || {};
+                fx_pass(F.prog.esc, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    g.uniform1f(p.loc.u_brightness, st.brightness ?? 1);
+                    g.uniform1f(p.loc.u_saturation, st.saturation ?? 1);
+                    g.uniform1f(p.loc.u_contrast, st.contrast ?? 1);
+                    g.uniform3f(p.loc.u_average, 0, 0, 0);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "lensDistortion": {
+                const st = eff_settings(eff, "lensDistortion", t) || {};
+                const c = st.center || { x: 0.5, y: 0.5 };
+                const conv = st.convergence ?? 0;
+                if (conv === 0) continue;          // 无畸变就别占一趟
+                const aspect = st.useScreenAspect
+                    ? (F.w / Math.max(1, F.h))
+                    : (st.manualAspect ?? 1);
+                fx_pass(F.prog.lensDist, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    g.uniform2f(p.loc.u_center, c.x, c.y);
+                    g.uniform1f(p.loc.u_size, st.size ?? 100);
+                    g.uniform1f(p.loc.u_convergence, conv);
+                    g.uniform1f(p.loc.u_aspect, aspect);
+                    g.uniform1f(p.loc.u_edgeSmooth, st.edgeSmoothness ?? 0.025);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "bloom": {
+                const st = eff_settings(eff, "bloom", t) || {};
+                const bc = st.bloomColor || { r: 1, g: 1, b: 1 };
+                // ★ 被 bloomBrightness 曲线驱动的是 brightness，不是 intensity。
+                //   intensity 是静态的全局系数（DS 1.85 / Message 1.61）。
+                const bright = st.brightness ?? 1;
+                const inten = (st.intensity ?? 1) * bright;
+                if (inten <= 0) continue;
+                fx_pass(F.prog.bloom, F.tex[1 - cur], (p, g) => {
+                    fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    // u_blurred 复用 u_src（bloom.frag 内部自己做阈值+模糊）
+                    fx_bind(g, 1, F.tex[cur], p.loc.u_blurred);
+                    g.uniform1f(p.loc.u_intensity, inten);
+                    g.uniform3f(p.loc.u_bloomColor, bc.r, bc.g, bc.b);
+                    g.uniform2f(p.loc.u_texel, 1 / Math.max(1, F.w), 1 / Math.max(1, F.h));
+                    g.uniform1f(p.loc.u_threshold, st.threshold ?? 0.3);
+                });
+                cur = 1 - cur;
+                break;
+            }
+            case "glitchDog": {
+                const st = eff_settings(eff, "glitchDog", t) || {};
+                /* DS 的 freeze：nowTime >= freezeTime 之后这五个量被固定成
+                   （参考 _analysis\_sample_focus.txt 里 freeze 那行，是**状态谓词**：
+                   146.752 active=False / 146.753 active=True，往回拖也应还原）。
+                   之前写成 `!eff._frozen` 才覆值 = 只有跨过 freezeTime 的那一帧生效，
+                   之后每帧 st 都从曲线重算，冻结其实立刻就失效了。 */
+                const ft = eff.scalars ? eff.scalars.freezeTime : null;
+                const active = ft !== null && ft !== undefined && t >= ft;
+                if (active) {
+                    st.noiseMoveSpeed = 0;
+                    st.noiseEvolveSpeed = 0;
+                    st.displaceSpeed = 0.4;
+                    st.glitchMapBrightness = 0;
+                    st.glitchMapContrast = 4;
+                }
+                eff._frozen = active;
+                cur = fx_pass_glitchdog(F, cur, eff, t, st);
+                break;
+            }
+            case "dimensionSlash":
+                cur = fx_pass_dimslash(F, cur, eff, t);
+                break;
+            case "lightBand":
+                cur = fx_pass_lightband(F, cur, eff, t);
+                break;
+            // case "kaleido" 不在这里：万花筒是背景层的黑幕材质（fx_layer_bg）
+        }
+    }
+    return cur;
+};
+
+const fx_render = (src_canvas, t, bg_canvas) => {
     const F = C.fx;
     const gl = F.gl;
     const pf = C.postfx;
     const K = pf ? pf.curves : null;
 
+    const eff = C.fx_eff;
+    /* 分层模式（异象）：bg_canvas=只有曲绘的背景画布，src_canvas=判定线+note 层。
+       背景层先入 tex[0] 走方块/黑幕/kaleido/网格，再把 note 层 alpha-over 合回来。
+       普通谱没有 bg_canvas，照旧整帧入 tex[0]。 */
+    const split = !!(bg_canvas && eff);
+
     gl.bindTexture(gl.TEXTURE_2D, F.tex[0]);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src_canvas);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE,
+                  split ? bg_canvas : src_canvas);
 
     let cur = 0;
     const run = (prog, setup) => {
@@ -1076,6 +1705,32 @@ const fx_render = (src_canvas, t) => {
 
         fx_blocks(t, F.tex[cur], F.tex[1 - cur]);
         cur = 1 - cur;
+    }
+
+    /* 首玩异象（Chapter9 baseline 的 LevelEffects）走独立分支：
+       pass 顺序 = prefab 里settings 字段的声明顺序，各曲线用 director_eval。
+       ★ fx_render_anomaly 沿用 run() 的约定：画面始终在 tex[cur]。 */
+    if (eff) {
+        if (split) {
+            // ① 背景层效果（黑幕/kaleido/网格）—— 作用在曲绘上，note 还没进来
+            cur = fx_layer_bg(F, cur, eff, t);
+            // ② 判定线+note 层盖回来（新建的 alpha-over 一趟）
+            gl.bindTexture(gl.TEXTURE_2D, F.fg);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src_canvas);
+            fx_pass(F.prog.over, F.tex[1 - cur], (p, g) => {
+                fx_bind(g, 0, F.tex[cur], p.loc.u_base);
+                fx_bind(g, 1, F.fg, p.loc.u_over);
+            });
+            cur = 1 - cur;
+        }
+        // ③ 整帧后处理链（lightBand/glitch/... 照旧跑在合成后的画面上）
+        cur = fx_render_anomaly(F, cur, eff, t);
+        /* 约定与 run()/下面非异象分支一致：每次 pass 写 tex[1-cur] 后 cur = 1-cur，
+           所以返回时画面在 tex[cur]，copy 必须读 tex[cur]。
+           之前读 1-cur：0 个 pass 时读到上一帧残留（整屏黑），
+           有 pass 时则永远丢掉最后一趟效果。 */
+        fx_pass(F.prog.copy, null, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src));
+        return;
     }
 
     if (!pf) {
@@ -1121,7 +1776,7 @@ const fx_render = (src_canvas, t) => {
     fx_pass(F.prog.copy, null, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src));
 };
 
-const apply_postfx = (src, dst, t) => {
+const apply_postfx = (src, dst, t, bg) => {
     const dctx = dst.getContext("2d");
     const w = dst.width, h = dst.height;
 
@@ -1134,8 +1789,15 @@ const apply_postfx = (src, dst, t) => {
     dctx.globalCompositeOperation = "source-over";
     dctx.clearRect(0, 0, w, h);
 
-    if (!C.fx_enabled || C.fx_failed) {
+    /* 分层降级：WebGL 用不了时 src 只有 note 层，必须先把背景画布垫上，
+       否则黑屏（两层是 render() 分开画的）。 */
+    const flat = () => {
+        if (bg) dctx.drawImage(bg, 0, 0);
         dctx.drawImage(src, 0, 0);
+    };
+
+    if (!C.fx_enabled || C.fx_failed) {
+        flat();
         return;
     }
 
@@ -1148,7 +1810,7 @@ const apply_postfx = (src, dst, t) => {
         }
         if (!C.fx) {
             C.fx_failed = true;
-            dctx.drawImage(src, 0, 0);
+            flat();
             return;
         }
         const gl = C.fx.gl;
@@ -1188,13 +1850,15 @@ const apply_postfx = (src, dst, t) => {
         set(C.fx.scene6, rt_dim(w, 6), rt_dim(h, 6));
     }
 
-    fx_render(src, t);
+    fx_render(src, t, bg);
     dctx.drawImage(C.fx.canvas, 0, 0);
 };
 
 /* ---------------- 主渲染 ---------------- */
 
-const render_scene = (sctx, t) => {
+/* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
+   "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
+const render_scene = (sctx, t, mode) => {
     const [w, h] = [cv.width, cv.height];
     const note_width = w * 0.1234375;
 
@@ -1202,8 +1866,11 @@ const render_scene = (sctx, t) => {
     sctx.globalAlpha = 1;
     sctx.globalCompositeOperation = "source-over";
     sctx.clearRect(0, 0, w, h);
-    sctx.drawImage(C.chart.image, 0, 0, w, h);
-    sctx.fillRectEx(0, 0, w, h, "rgba(0, 0, 0, 0.6)");
+    if (mode !== "fg") {
+        sctx.drawImage(C.chart.image, 0, 0, w, h);
+        sctx.fillRectEx(0, 0, w, h, "rgba(0, 0, 0, 0.6)");
+    }
+    if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
 
     for (const line of C.chart.data.judgeLineList) {
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
@@ -1347,8 +2014,17 @@ const render = () => {
     // rAF 必须无条件续上：以前它排在最后，一帧抛异常整条渲染循环就死了，画面永远黑屏
     try {
         if (cv.width && cv.height) {
-            render_scene(C.scene_cv.getContext("2d"), t);
-            apply_postfx(C.scene_cv, cv, t);
+            /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
+               effect Canvas 上（画在判定线/note 之下），所以场景拆成
+               「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
+            const split = !!(C.fx_eff && C.fx && C.fx_enabled && !C.fx_failed);
+            if (split) {
+                render_scene(C.bg_cv.getContext("2d"), t, "bg");
+                render_scene(C.scene_cv.getContext("2d"), t, "fg");
+            } else {
+                render_scene(C.scene_cv.getContext("2d"), t);
+            }
+            apply_postfx(C.scene_cv, cv, t, split ? C.bg_cv : null);
             update_progress(t);
         }
     } catch (e) {
@@ -1510,7 +2186,7 @@ const music_ended = () => {
     clock.perf = performance.now();
 };
 
-const load_chart = async (dir, assetDir) => {
+const load_chart = async (dir, assetDir, anomaly) => {
     // dir = 谱面目录（chart.json / info.json）；adir = 共享资源目录（曲绘 / 音乐 / postfx）
     const adir = assetDir || dir;
     const reuse = asset_cache.dir === adir;
@@ -1578,7 +2254,25 @@ const load_chart = async (dir, assetDir) => {
     C.glitch_img = glitch_img;
     C.chart.music = music;
 
+    /* ★ init_chart 必须在下面的 await 之前：C.chart 已换成新谱面，
+       渲染循环（rAF）是并发跑的，若异步窗口里 line 还没挂上 get_state/sec2beat，
+       每帧都会抛 "line.get_state is not a function"（切异象谱时实测刷了一串）。
+       init_chart 不引用 fx/fx_eff，fx_load_anomaly 不引用 C.chart —— 顺序可安全互换。 */
     init_chart();
+
+    /* 首玩异象：清掉上一首的，再按需载入。异象与 s6 那套 postfx 互斥
+       （fx_render 里优先走 eff 分支）。anomaly 来自 index.json 的条目，
+       可用 URL 参数 ?noanomaly=1 强制关掉。 */
+    C.fx_eff = null;
+    if (anomaly && !/[?&]noanomaly=1/.test(location.search)) {
+        try {
+            await fx_load_anomaly(anomaly);
+        } catch (e) {
+            C.fx_eff = null;
+            console.warn("异象载入失败，回退普通画面:", e);
+        }
+    }
+
     clock_run(false);
     ui.btn_play.textContent = ">";
     ui.loading_overlay.classList.add("hidden");
@@ -1725,7 +2419,8 @@ const select_chart = async e => {
     ui.library_overlay.classList.add("hidden");
     ui.start_overlay.classList.add("hidden");
     try {
-        await load_chart(R(e.path), R(e.asset || e.path));
+        // anomaly 来自 index.json：这三首 SP 首玩会带 LevelEffects 异象
+        await load_chart(R(e.path), R(e.asset || e.path), e.anomaly);
         chart_started = false;
         ui.start_overlay.classList.remove("hidden");
     } catch (err) {
@@ -1737,6 +2432,7 @@ const select_chart = async e => {
 
 window.onload = async () => {
     C.scene_cv = document.createElement("canvas");
+    C.bg_cv = document.createElement("canvas");   // 异象分层：曲绘专用背景画布
     C.block_cv = document.createElement("canvas");
     C.block_sub_cv = document.createElement("canvas");
 
@@ -1745,6 +2441,8 @@ window.onload = async () => {
         cv.height = window.innerHeight;
         C.scene_cv.width = cv.width;
         C.scene_cv.height = cv.height;
+        C.bg_cv.width = cv.width;
+        C.bg_cv.height = cv.height;
         // 方块 mask 按原版 RT 尺寸 w/8 × h/8 光栅化（HANDOFF §3.1：那几对 mask RT 全是
         // w/8、Point，compose 也跑在 /8 上）。>> 3 就是原版 Start 里的 v31>>3 / v32>>3。
         C.block_cv.width = Math.max(1, cv.width >> 3);
