@@ -2,13 +2,14 @@
     <canvas id="main-canvas"></canvas>
 
     <div id="hud">
-        <div id="bottom-bar">
+        <div id="bottom-bar" class="hidden">
             <button id="btn-play" title="Play/Pause(Space)">▶</button>
             <div id="progress-wrap">
                 <div id="progress-fill"></div>
                 <div id="progress-marks"></div>
             </div>
             <span id="time-label">0.00 / 0.00</span>
+            <button id="btn-export" title="导出视频 (V)">🎬</button>
             <button id="btn-library" title="谱面库 (L)">▤</button>
         </div>
 
@@ -29,6 +30,53 @@
                 <button id="library-close" title="关闭 (Esc)">✕</button>
             </div>
             <div id="library-grid"></div>
+        </div>
+
+        <div id="export-overlay" class="hidden">
+            <div id="export-panel">
+                <div id="export-head">
+                    <span id="export-title">导出视频（离线逐帧渲染 → WebM/VP9 + Opus）</span>
+                    <button id="export-close" title="关闭 (Esc)">✕</button>
+                </div>
+                <div class="exp-row">
+                    <label>分辨率</label>
+                    <input id="exp-w" type="number" min="64" max="4096" step="2" value="1920">
+                    <span>×</span>
+                    <input id="exp-h" type="number" min="64" max="4096" step="2" value="1080">
+                    <button id="exp-p720" class="exp-mini">1280×720</button>
+                    <button id="exp-p1080" class="exp-mini">1920×1080</button>
+                    <button id="exp-pwin" class="exp-mini">窗口尺寸</button>
+                </div>
+                <div class="exp-row">
+                    <label>帧率</label>
+                    <select id="exp-fps">
+                        <option value="60" selected>60</option>
+                        <option value="30">30</option>
+                    </select>
+                    <label>码率 Mbps</label>
+                    <input id="exp-bitrate" type="number" min="1" max="80" step="1" value="10">
+                </div>
+                <div class="exp-row">
+                    <label>范围 s</label>
+                    <input id="exp-start" type="number" min="0" step="0.1" value="0">
+                    <span>~</span>
+                    <input id="exp-end" type="number" min="0" step="0.1" value="0">
+                    <button id="exp-whole" class="exp-mini">整首</button>
+                    <button id="exp-here" class="exp-mini">当前→末尾</button>
+                </div>
+                <div class="exp-row">
+                    <label class="exp-check"><input id="exp-audio" type="checkbox" checked> 含音乐（Opus）</label>
+                    <span id="exp-est"></span>
+                </div>
+                <div class="exp-row">
+                    <button id="exp-go">开始导出</button>
+                    <button id="exp-cancel" disabled>取消</button>
+                </div>
+                <div id="export-progress-wrap" class="hidden">
+                    <div id="export-progress"><div id="export-progress-fill"></div></div>
+                    <div id="export-status"></div>
+                </div>
+            </div>
         </div>
     </div>
 </body>
@@ -78,6 +126,9 @@
         pointer-events: auto;
         font-size: 12px;
     }
+
+    /* 底栏默认隐藏（初始即带 hidden，避免加载瞬间闪一下），按 B 键切换 */
+    #bottom-bar.hidden { display: none; }
 
     #btn-play {
         width: 34px;
@@ -198,7 +249,7 @@
 
     /* ---- 谱面库（import_library.py 生成的 res/library/index.json 驱动） ---- */
 
-    #btn-library {
+    #btn-library, #btn-export {
         width: 34px;
         height: 34px;
         flex: 0 0 auto;
@@ -330,6 +381,140 @@
 
     .lib-level {
         font-size: 11px;
+        color: var(--hud-fg-dim);
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* ---- 导出视频浮层 ---- */
+
+    #export-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(6, 6, 12, 0.82);
+        backdrop-filter: blur(4px);
+        pointer-events: auto;
+    }
+
+    #export-overlay.hidden { display: none; }
+
+    #export-panel {
+        width: min(580px, 92vw);
+        padding: 16px 18px 18px;
+        background: rgba(16, 16, 24, 0.96);
+        border: 1px solid var(--hud-line);
+        border-radius: 12px;
+        font-size: 12px;
+    }
+
+    #export-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    #export-title { flex: 1 1 auto; font-size: 14px; letter-spacing: 0.03em; }
+
+    #export-close {
+        width: 28px;
+        height: 28px;
+        font-size: 12px;
+        color: var(--hud-fg);
+        background: transparent;
+        border: 1px solid var(--hud-line);
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    .exp-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 9px 0;
+        color: var(--hud-fg);
+    }
+
+    .exp-row > label { flex: 0 0 auto; color: var(--hud-fg-dim); }
+
+    .exp-row .exp-check { color: var(--hud-fg); cursor: pointer; }
+
+    .exp-row input[type="number"],
+    .exp-row select {
+        width: 76px;
+        padding: 4px 6px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--hud-line);
+        border-radius: 6px;
+        color: var(--hud-fg);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .exp-row select { width: 60px; }
+
+    #exp-est { margin-left: auto; color: var(--hud-fg-dim); font-variant-numeric: tabular-nums; }
+
+    .exp-mini {
+        padding: 3px 8px;
+        font-size: 11px;
+        color: var(--hud-fg-dim);
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--hud-line);
+        border-radius: 6px;
+        cursor: pointer;
+    }
+
+    .exp-mini:hover { color: var(--hud-fg); border-color: rgba(255, 255, 255, 0.4); }
+
+    #exp-go {
+        padding: 6px 18px;
+        font-size: 12px;
+        color: #fff;
+        background: var(--hud-accent);
+        border: 0;
+        border-radius: 7px;
+        cursor: pointer;
+    }
+
+    #exp-go:disabled { opacity: 0.45; cursor: default; }
+
+    #exp-cancel {
+        padding: 6px 14px;
+        font-size: 12px;
+        color: var(--hud-fg);
+        background: transparent;
+        border: 1px solid var(--hud-line);
+        border-radius: 7px;
+        cursor: pointer;
+    }
+
+    #exp-cancel:disabled { opacity: 0.35; cursor: default; }
+
+    #export-progress-wrap { margin-top: 10px; }
+
+    #export-progress-wrap.hidden { display: none; }
+
+    #export-progress {
+        height: 6px;
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+
+    #export-progress-fill {
+        height: 100%;
+        width: 0;
+        background: var(--hud-accent);
+        transition: width 0.15s linear;
+    }
+
+    #export-status {
+        min-height: 16px;
+        margin-top: 6px;
         color: var(--hud-fg-dim);
         font-variant-numeric: tabular-nums;
     }

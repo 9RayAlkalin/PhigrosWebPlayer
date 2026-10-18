@@ -100,6 +100,7 @@ const ui = {
     progress_fill: el("#progress-fill"),
     progress_marks: el("#progress-marks"),
     time_label: el("#time-label"),
+    bottom_bar: el("#bottom-bar"),
     start_overlay: el("#start-overlay"),
     loading_overlay: el("#loading-overlay"),
     loading_fill: el("#loading-fill"),
@@ -112,7 +113,30 @@ const ui = {
     loading_overlay: el("#loading-overlay"),
     loading_label: el("#loading-label"),
     loading_fill: el("#loading-fill"),
-    loading_text: el("#loading-text")
+    loading_text: el("#loading-text"),
+
+    /* 视频导出面板 */
+    btn_export: el("#btn-export"),
+    export_overlay: el("#export-overlay"),
+    export_close: el("#export-close"),
+    export_w: el("#exp-w"),
+    export_h: el("#exp-h"),
+    export_fps: el("#exp-fps"),
+    export_bitrate: el("#exp-bitrate"),
+    export_start: el("#exp-start"),
+    export_end: el("#exp-end"),
+    export_audio: el("#exp-audio"),
+    export_est: el("#exp-est"),
+    export_p720: el("#exp-p720"),
+    export_p1080: el("#exp-p1080"),
+    export_pwin: el("#exp-pwin"),
+    export_whole: el("#exp-whole"),
+    export_here: el("#exp-here"),
+    export_go: el("#exp-go"),
+    export_cancel: el("#exp-cancel"),
+    export_progress_wrap: el("#export-progress-wrap"),
+    export_progress_fill: el("#export-progress-fill"),
+    export_status: el("#export-status")
 };
 
 // ---- 部署基址 --------------------------------------------------------------
@@ -2009,6 +2033,31 @@ const apply_postfx = (src, dst, t, bg) => {
     dctx.drawImage(C.fx.canvas, 0, 0);
 };
 
+/* ---------------- 画布尺寸 ----------------
+   所有渲染尺寸都从这两个函数走：resize_canvases 是唯一入口，
+   resize_to_window 跟窗口走（onresize 与视频导出结束时都回到它）。
+   视频导出期间会临时把画布切到导出分辨率（w×h 与 w/8 的方块 mask 画布）。 */
+const resize_canvases = (w, h) => {
+    cv.width = w;
+    cv.height = h;
+    C.scene_cv.width = w;
+    C.scene_cv.height = h;
+    C.bg_cv.width = w;
+    C.bg_cv.height = h;
+    // 方块 mask 按原版 RT 尺寸 w/8 × h/8 光栅化（HANDOFF §3.1：那几对 mask RT 全是
+    // w/8、Point，compose 也跑在 /8 上）。>> 3 就是原版 Start 里的 v31>>3 / v32>>3。
+    C.block_cv.width = Math.max(1, w >> 3);
+    C.block_cv.height = Math.max(1, h >> 3);
+    C.block_sub_cv.width = C.block_cv.width;
+    C.block_sub_cv.height = C.block_cv.height;
+};
+
+const resize_to_window = () => {
+    // 导出期间画布是导出分辨率，窗口 onresize 不许把它覆盖掉
+    if (C.video_export_active) return;
+    resize_canvases(window.innerWidth, window.innerHeight);
+};
+
 /* ---------------- 主渲染 ---------------- */
 
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
@@ -2041,7 +2090,9 @@ const render_scene = (sctx, t, mode) => {
 
         for (const note of line.notes) {
             if (note.sect < t && !note.clicked) {
-                play_sound(C.click_sounds[note.type]);
+                // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
+                // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
+                if (!C.video_export_active) play_sound(C.click_sounds[note.type]);
                 note.clicked = true;
             }
 
@@ -2178,27 +2229,37 @@ const render_scene = (sctx, t, mode) => {
     render_blocks(sctx, t);
 };
 
+/* 渲染「某一时刻」的一帧。时间轴 = get_time() 域（秒，即音乐秒），内部再减谱面 offset。
+   实时播放（render）与视频导出（export_video）都走这一条路径 —— 导出画面 == 播放画面。 */
+const render_frame_at = (t_raw) => {
+    if (!cv.width || !cv.height) return;
+    const t = t_raw - C.chart.data.offset;
+    /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
+       effect Canvas 上（画在判定线/note 之下），所以场景拆成
+       「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
+    /* F5（audit 2026-10-06 修复）：不只异象 —— 任何带方块的谱也分层，
+       否则非 split 路径会把 disabled 方块烘进含 note/判定线的整帧
+       （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
+    const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
+    const split = !!((C.fx_eff || has_blocks) && C.fx && C.fx_enabled && !C.fx_failed);
+    if (split) {
+        render_scene(C.bg_cv.getContext("2d"), t, "bg");
+        render_scene(C.scene_cv.getContext("2d"), t, "fg");
+    } else {
+        render_scene(C.scene_cv.getContext("2d"), t);
+    }
+    apply_postfx(C.scene_cv, cv, t, split ? C.bg_cv : null);
+};
+
 const render = () => {
-    const t = get_time() - C.chart.data.offset;
     // rAF 必须无条件续上：以前它排在最后，一帧抛异常整条渲染循环就死了，画面永远黑屏
     try {
-        if (cv.width && cv.height) {
-            /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
-               effect Canvas 上（画在判定线/note 之下），所以场景拆成
-               「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
-            /* F5（audit 2026-10-06 修复）：不只异象 —— 任何带方块的谱也分层，
-               否则非 split 路径会把 disabled 方块烘进含 note/判定线的整帧
-               （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
-            const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
-            const split = !!((C.fx_eff || has_blocks) && C.fx && C.fx_enabled && !C.fx_failed);
-            if (split) {
-                render_scene(C.bg_cv.getContext("2d"), t, "bg");
-                render_scene(C.scene_cv.getContext("2d"), t, "fg");
-            } else {
-                render_scene(C.scene_cv.getContext("2d"), t);
-            }
-            apply_postfx(C.scene_cv, cv, t, split ? C.bg_cv : null);
-            update_progress(t);
+        // 视频导出期间由 export_video 逐帧驱动，这里让位（否则两边抢同一张画布，
+        // 也会把导出帧的时间戳搅乱）
+        if (!C.video_export_active) {
+            const t_raw = get_time();
+            render_frame_at(t_raw);
+            update_progress(t_raw - C.chart.data.offset);
         }
     } catch (e) {
         console.error("渲染帧出错（已跳过该帧）：", e);
@@ -2232,6 +2293,609 @@ CanvasRenderingContext2D.prototype.drawCenterRotateImage = function (img, x, y, 
     this.rotate(deg * Math.PI / 180);
     this.drawImage(img, -w / 2, -h / 2, w, h);
     this.restore();
+};
+
+/* ---------------- 视频导出 ----------------
+   把当前谱面离线逐帧渲染成 WebM（VP9/VP8 + Opus）。为什么这么做：
+
+   1. 不跟真实时钟走：每帧直接调 render_frame_at(t)（与「seek 后手动 render()」同一条
+      管线），帧号 → 时间戳精确可复现；机器快就导出快，不会因为是实时的而丢帧。
+   2. 编码走 WebCodecs（VideoEncoder + AudioEncoder），时间戳由我们自己写死（i/fps），
+      输出是严格 CFR；不走 MediaRecorder（它只能边放边录，时间戳跟墙钟抖动）。
+   3. 封装是这个文件里的最小 WebM（EBML/Matroska）写入器，不引第三方库：
+      整文件在内存里攒完一次性成 Blob，所有元素尺寸精确写出；不写 SeekHead
+      （与 MediaRecorder 产物同档，Chrome/ffmpeg 都能播能拖），Cues 写全
+      （每个视频关键帧一条），拖进度条靠它。
+   4. 音频不走实时采样：OfflineAudioContext 把 music.ogg 重采样到 48k 后整段切片
+      喂 Opus 编码器 —— 音视频时间戳同源，天然对齐。
+      打击音（WebAudio 实时播放那套）不进导出：导出比实时快，实时音必然错位；
+      录像对照要的是「音乐 vs 画面」，不是「游戏音效」。
+   5. 导出期间画布临时切到目标分辨率（resize_canvases），结束后恢复窗口尺寸
+      （resize_to_window）；render() 由 C.video_export_active 让位。
+
+   控制台/脚本用法（_analysis 的 eval 工作流可直接调）：
+     const blob = await export_video({ width: 1280, height: 720, fps: 60,
+                                       start: 0, end: 172, audio: true, bitrate: 5 });
+   start/end 单位秒、与播放时钟同域（音频秒）；bitrate 单位 Mbps（缺省按分辨率自动）。
+   返回值同时挂在 video_export.blob 上；面板「开始导出」= 调它 + 触发下载。
+
+   内存：整段编码数据 + 最终 Blob 同时在内存里，峰值 ≈ 2× 文件大小
+   （1080p60 三分钟约 200~250 MB 量级，属可接受；要更低就把码率调小）。 */
+
+/* ---- 最小 WebM 写入器 ----
+   EBML 基本元素就这几样，全部「已知尺寸」写出。IDs 按规范字节直接列。 */
+const wb_utf8 = new TextEncoder();
+const WEBM_ID = {
+    ebml: [0x1A, 0x45, 0xDF, 0xA3],
+    ebml_version: [0x42, 0x86], ebml_read_version: [0x42, 0xF7],
+    ebml_max_id: [0x42, 0xF2], ebml_max_size: [0x42, 0xF3],
+    doctype: [0x42, 0x82], doctype_version: [0x42, 0x87], doctype_read_version: [0x42, 0x85],
+    segment: [0x18, 0x53, 0x80, 0x67],
+    info: [0x15, 0x49, 0xA9, 0x66], timecode_scale: [0x2A, 0xD7, 0xB1],
+    muxing_app: [0x4D, 0x80], writing_app: [0x57, 0x41], duration: [0x44, 0x89],
+    tracks: [0x16, 0x54, 0xAE, 0x6B], track_entry: [0xAE], track_number: [0xD7],
+    track_uid: [0x73, 0xC5], track_type: [0x83], flag_lacing: [0x9C],
+    codec_id: [0x86], codec_private: [0x63, 0xA2], codec_delay: [0x56, 0xAA],
+    seek_pre_roll: [0x56, 0xBB], default_duration: [0x23, 0xE3, 0x83],
+    video: [0xE0], flag_interlaced: [0x9A], pixel_width: [0xB0], pixel_height: [0xBA],
+    audio: [0xE1], sampling_freq: [0xB5], channels: [0x9F],
+    cluster: [0x1F, 0x43, 0xB6, 0x75], timecode: [0xE7], simple_block: [0xA3],
+    cues: [0x1C, 0x53, 0xBB, 0x6B], cue_point: [0xBB], cue_time: [0xB3],
+    cue_positions: [0xB7], cue_track: [0xF7], cue_cluster_pos: [0xF1]
+};
+
+/* 拼接若干 Uint8Array（可嵌套数组 / 跳过 null），一次性分配 */
+const cat_bytes = (...arrs) => {
+    const flat = [];
+    const push = a => {
+        if (a == null) return;
+        if (a instanceof Uint8Array) { flat.push(a); return; }
+        for (const x of a) push(x);
+    };
+    push(arrs);
+    let n = 0;
+    for (const b of flat) n += b.length;
+    const out = new Uint8Array(n);
+    let off = 0;
+    for (const b of flat) { out.set(b, off); off += b.length; }
+    return out;
+};
+
+/* EBML 变长整数（元素尺寸、SimpleBlock 里的轨道号）。全 1 模式是「未知尺寸」保留值，
+   所以可用上界是 2^(7·len)−2，按此选最短长度。 */
+const wb_vint = v => {
+    for (let len = 1; len <= 8; len++) {
+        const max = Math.pow(2, 7 * len) - 1;
+        if (v < max) {
+            const out = new Uint8Array(len);
+            let x = v;
+            for (let i = len - 1; i >= 0; i--) { out[i] = x & 0xff; x = Math.floor(x / 256); }
+            out[0] |= 1 << (8 - len);
+            return out;
+        }
+    }
+    throw new Error("webm: vint 溢出");
+};
+
+const wb_uint = n => {
+    const out = [];
+    let x = Math.max(0, Math.floor(n));
+    do { out.unshift(x & 0xff); x = Math.floor(x / 256); } while (x > 0);
+    return Uint8Array.from(out);
+};
+
+const wb_f64 = n => {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setFloat64(0, n);
+    return b;
+};
+
+const wb_el = (id, ...payload) => {
+    const body = cat_bytes(...payload);
+    return cat_bytes(Uint8Array.from(id), wb_vint(body.length), body);
+};
+
+/* 写入器：add_video/add_audio 收 EncodedVideoChunk/EncodedAudioChunk（按时间戳归并
+   入簇，见导出驱动的 pump），finish 出 Blob。
+   簇切换：>4s / >4MB / 遇视频关键帧（导出每 2s 一个）——
+   簇内 SimpleBlock 的相对时间戳是 int16 毫秒，4s 远在 ±32.7s 限内。
+   frame_ns = 视频帧时长（ns），写进 TrackEntry/DefaultDuration —— 没有它
+   ffprobe/播放器推不出帧率（实测 r_frame_rate 会变成 1000/1 这种怪值）。 */
+const webm_writer = ({ width, height, video_codec, frame_ns, audio, duration_ms }) => {
+    const clusters = [];
+    const cues = [];            // { t: 关键帧 ms, cluster: 簇下标（簇未封口时 = clusters.length） }
+    let cur = null;
+
+    const new_cluster = ts => { cur = { ts, blocks: [], size: 0 }; };
+    const seal_cluster = () => {
+        if (!cur) return;
+        clusters.push(wb_el(WEBM_ID.cluster,
+            wb_el(WEBM_ID.timecode, wb_uint(cur.ts)), ...cur.blocks));
+        cur = null;
+    };
+    const add_block = (track, ts_ms, key, data) => {
+        if (!cur) new_cluster(ts_ms);
+        const span = ts_ms - cur.ts;
+        if (span > 4000 || cur.size > (4 << 20) || (track === 1 && key && cur.blocks.length && span > 0)) {
+            seal_cluster();
+            new_cluster(ts_ms);
+        }
+        const head = new Uint8Array(4);
+        head[0] = 0x80 | track;                                   // 轨道号 vint（1/2 均单字节）
+        new DataView(head.buffer).setInt16(1, ts_ms - cur.ts);
+        head[3] = key ? 0x80 : 0;
+        // ★ SimpleBlock = A3 + 尺寸 + [轨道号][int16 相对时间][flags][数据]。
+        //   第一版漏了 wb_el 这层包装，把裸 payload 塞进簇 —— 文件结构自洽（尺寸都对），
+        //   ffmpeg 也能认出轨道/时长，但一个 Block 都解不出来
+        //   （_analysis\ebml_check.py 与 ffprobe 的 “0x00 at pos …” 警告就是这来的）。
+        const blk = wb_el(WEBM_ID.simple_block, head, data);
+        cur.blocks.push(blk);
+        cur.size += blk.length;
+        if (track === 1 && key) cues.push({ t: ts_ms, cluster: clusters.length });
+    };
+    const chunk_bytes = chunk => {
+        const b = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(b);
+        return b;
+    };
+
+    const finish = () => {
+        seal_cluster();
+        const info = wb_el(WEBM_ID.info,
+            wb_el(WEBM_ID.timecode_scale, wb_uint(1000000)),     // 1 tick = 1ms
+            wb_el(WEBM_ID.muxing_app, wb_utf8.encode("PhigrosWebPlayer")),
+            wb_el(WEBM_ID.writing_app, wb_utf8.encode("PhigrosWebPlayer")),
+            wb_el(WEBM_ID.duration, wb_f64(duration_ms)));
+        const tracks_payload = [wb_el(WEBM_ID.track_entry,
+            wb_el(WEBM_ID.track_number, wb_uint(1)),
+            wb_el(WEBM_ID.track_uid, wb_uint(1)),
+            wb_el(WEBM_ID.track_type, wb_uint(1)),
+            wb_el(WEBM_ID.flag_lacing, wb_uint(0)),
+            wb_el(WEBM_ID.codec_id, wb_utf8.encode(video_codec)),
+            wb_el(WEBM_ID.default_duration, wb_uint(frame_ns)),  // ns/帧 → 帧率元数据
+            wb_el(WEBM_ID.video,
+                wb_el(WEBM_ID.flag_interlaced, wb_uint(2)),      // 2 = progressive
+                wb_el(WEBM_ID.pixel_width, wb_uint(width)),
+                wb_el(WEBM_ID.pixel_height, wb_uint(height))))];
+        if (audio) {
+            tracks_payload.push(wb_el(WEBM_ID.track_entry,
+                wb_el(WEBM_ID.track_number, wb_uint(2)),
+                wb_el(WEBM_ID.track_uid, wb_uint(2)),
+                wb_el(WEBM_ID.track_type, wb_uint(2)),
+                wb_el(WEBM_ID.flag_lacing, wb_uint(0)),
+                wb_el(WEBM_ID.codec_id, wb_utf8.encode("A_OPUS")),
+                wb_el(WEBM_ID.codec_private, audio.codec_private),
+                wb_el(WEBM_ID.codec_delay, wb_uint(audio.codec_delay_ns)),
+                wb_el(WEBM_ID.seek_pre_roll, wb_uint(80000000)), // Opus 规范值 80ms
+                wb_el(WEBM_ID.audio,
+                    wb_el(WEBM_ID.sampling_freq, wb_f64(48000)),
+                    wb_el(WEBM_ID.channels, wb_uint(audio.channels)))));
+        }
+        const tracks = wb_el(WEBM_ID.tracks, ...tracks_payload);
+
+        // Cues 的簇位置 = 相对 Segment 数据起点（Info/Tracks 之后）的字节偏移；
+        // 此时所有簇都已封口，尺寸全知
+        let off = info.length + tracks.length;
+        const cl_off = clusters.map(c => { const o = off; off += c.length; return o; });
+        const cues_el = wb_el(WEBM_ID.cues, ...cues.map(q => wb_el(WEBM_ID.cue_point,
+            wb_el(WEBM_ID.cue_time, wb_uint(q.t)),
+            wb_el(WEBM_ID.cue_positions,
+                wb_el(WEBM_ID.cue_track, wb_uint(1)),
+                wb_el(WEBM_ID.cue_cluster_pos, wb_uint(cl_off[q.cluster]))))));
+
+        // Segment 头单独写（尺寸 = 其后全部内容）；其余全部作为 Blob 分片拼装，
+        // 避免再整体复制一份
+        const seg_head = cat_bytes(Uint8Array.from(WEBM_ID.segment), wb_vint(off + cues_el.length));
+        const head = wb_el(WEBM_ID.ebml,
+            wb_el(WEBM_ID.ebml_version, wb_uint(1)),
+            wb_el(WEBM_ID.ebml_read_version, wb_uint(1)),
+            wb_el(WEBM_ID.ebml_max_id, wb_uint(4)),
+            wb_el(WEBM_ID.ebml_max_size, wb_uint(8)),
+            wb_el(WEBM_ID.doctype, wb_utf8.encode("webm")),
+            wb_el(WEBM_ID.doctype_version, wb_uint(4)),          // VP9 需要 ≥4（VP8 也兼容）
+            wb_el(WEBM_ID.doctype_read_version, wb_uint(2)));
+        const blob = new Blob([head, seg_head, info, tracks, ...clusters, cues_el],
+                              { type: "video/webm" });
+        clusters.length = 0;   // Blob 已复制，释放引用给 GC
+        return blob;
+    };
+
+    return {
+        add_video: chunk => add_block(1, Math.round(chunk.timestamp / 1000),
+                                      chunk.type === "key", chunk_bytes(chunk)),
+        add_audio: chunk => add_block(2, Math.round(chunk.timestamp / 1000),
+                                      true, chunk_bytes(chunk)),
+        finish
+    };
+};
+
+/* ---- 导出驱动 ---- */
+
+const video_export = {
+    blob: null, name: "", done: 0, total: 0, status: "", error: null, perf0: 0
+};
+
+/* 让出主线程一拍。不能用 setTimeout：后台标签页里被节流到 ≥1s，
+   导出会退化成 1 帧/秒。MessageChannel 不受节流，而且必须是宏任务级让步 ——
+   await 一个已 resolve 的 promise 只清微任务队列，浏览器/工具消息永远进不来。 */
+const yield_tick = () => new Promise(resolve => {
+    const mc = new MessageChannel();
+    mc.port1.onmessage = () => { mc.port1.close(); resolve(); };
+    mc.port2.postMessage(0);
+});
+
+/* 每帧必让出（不是只在积压时让）：渲染一帧是同步大块，若编码器跟得上、
+   队列不积压，这个函数此前会直接返回 —— 整个导出循环变成一条微任务长链，
+   主线程被焊死（本轮实测：连 1+1 的评估都进不来）。另外顺带兜底：
+   编码器出错/被取消时别在这里空转。 */
+const wait_encoder = async (enc, abort_check) => {
+    do {
+        if (abort_check) abort_check();
+        await yield_tick();
+    } while (enc.encodeQueueSize > 8);
+};
+
+/* 片段导出起点预置：顺序播放时 render_scene 在 note.sect < t 的第一帧就把 clicked
+   置上，所以 t0 时刻的正确状态 = clicked ⇔ sect < t0。不预置的话，跨起点的 hold
+   体会以全长姿态出现在片段开头（hold 收缩只在 clicked 后生效）。 */
+const preclick_notes = t0 => {
+    for (const line of C.chart.data.judgeLineList) {
+        for (const note of line.notes) note.clicked = note.sect < t0;
+    }
+};
+
+const export_filename = (w, h, fps) => {
+    const info = C.chart.info || {};
+    const dir = String(C.chart.dir || "").split("/").filter(Boolean).pop() || "";
+    const base = [info.name || "chart", dir, `${w}x${h}`, `${fps}fps`]
+        .filter(Boolean).join("_").replace(/[\\/:*?"<>|]/g, "_");
+    const d = new Date();
+    const p2 = n => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}` +
+                  `_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    return `${base}_${stamp}.webm`;
+};
+
+/* 音频轨：music.ogg → 48k 立体声 [t0, t1) 段（OfflineAudioContext 离线重采样，
+   比实时快得多；t0 超曲长则整段静音）。url 走 <audio> 元素同一地址，命中 HTTP 缓存。 */
+const render_audio_48k = async (url, t0, t1) => {
+    const buf = await load_audio(url);
+    const sr = 48000;
+    const len = Math.max(1, Math.ceil((t1 - t0) * sr));
+    const off = new OfflineAudioContext(2, len, sr);
+    if (buf && t0 < buf.duration) {
+        const src = off.createBufferSource();
+        src.buffer = buf;
+        src.start(0, t0, Math.max(0, Math.min(t1, buf.duration) - t0));
+        src.connect(off.destination);
+    }
+    return await off.startRendering();
+};
+
+/* Opus 编码：20ms 一帧（960 样点）。时间戳从 0 起（与视频同源）。
+   decoderConfig.description 就是 OpusHead，留作 CodecPrivate；没有就手搓兜底。 */
+const opus_head_fallback = channels => {
+    const b = new Uint8Array(19);
+    b.set(wb_utf8.encode("OpusHead"), 0);
+    b[8] = 1;                                        // version
+    b[9] = channels;
+    const dv = new DataView(b.buffer);
+    dv.setUint16(10, 312, true);                     // pre-skip（libopus 默认 6.5ms）
+    dv.setUint32(12, 48000, true);                   // 原始采样率
+    dv.setUint16(16, 0, true);                       // 输出增益
+    b[18] = 0;                                       // 声道映射族 = 0（单流）
+    return b;
+};
+
+const encode_audio_48k = async rendered => {
+    const chunks = [];
+    const out = { desc: null, error: null, channels: rendered.numberOfChannels };
+    const enc = new AudioEncoder({
+        output: (chunk, meta) => {
+            const d = meta && meta.decoderConfig && meta.decoderConfig.description;
+            if (d && !out.desc) out.desc = new Uint8Array(d);
+            chunks.push(chunk);
+        },
+        error: e => { out.error = e; }
+    });
+    enc.configure({
+        codec: "opus", sampleRate: 48000,
+        numberOfChannels: out.channels, bitrate: 128000
+    });
+    const FRAME = 960;                               // 20ms @48k
+    const planes = [];
+    for (let c = 0; c < out.channels; c++) planes.push(rendered.getChannelData(c));
+    let n_chunk = 0;
+    for (let pos = 0; pos < rendered.length; pos += FRAME) {
+        if (out.error) break;
+        const n = Math.min(FRAME, rendered.length - pos);
+        const planar = new Float32Array(n * out.channels);
+        for (let c = 0; c < out.channels; c++) {
+            planar.set(planes[c].subarray(pos, pos + n), c * n);
+        }
+        const ad = new AudioData({
+            format: "f32-planar", sampleRate: 48000,
+            numberOfFrames: n, numberOfChannels: out.channels,
+            timestamp: Math.round(pos / 48000 * 1e6), data: planar
+        });
+        enc.encode(ad);
+        ad.close();
+        n_chunk++;
+        if ((n_chunk & 127) === 0) await yield_tick();   // 长曲也别把主线程焊住
+        if (enc.encodeQueueSize > 16) await wait_encoder(enc);
+    }
+    await enc.flush().catch(e => { out.error = out.error || e; });
+    enc.close();
+    chunks.sort((a, b) => a.timestamp - b.timestamp);
+    return { chunks, desc: out.desc, error: out.error, channels: out.channels };
+};
+
+const export_video = async (opt = {}) => {
+    if (C.video_export_active) throw new Error("已有导出任务在跑");
+    if (!C.chart || !C.chart.data || !C.chart.data.judgeLineList) throw new Error("尚未载入谱面");
+    if (!window.VideoEncoder) throw new Error("此浏览器不支持 WebCodecs（VideoEncoder）");
+
+    const m = C.chart.music;
+    const fps = Math.min(120, Math.max(1, Math.round(opt.fps || 60)));
+    const w = Math.max(64, Math.round((opt.width || 1920) / 2) * 2);
+    const h = Math.max(64, Math.round((opt.height || 1080) / 2) * 2);
+    const dur = C.chart.duration || 0;
+    const start = Math.max(0, opt.start != null ? +opt.start : 0);
+    let end = opt.end != null ? +opt.end : dur;
+    if (!(end > start)) end = Math.max(dur, start + 1);
+    end = Math.min(end, Math.max(dur, start) + 10);          // 尾部最多多渲 10s
+    const total = Math.max(1, Math.ceil((end - start) * fps));
+    const mbps = opt.bitrate > 0 ? +opt.bitrate
+                                 : Math.max(1, w * h * fps * 0.08 / 1e6);
+    const bitrate = Math.round(mbps * 1e6);
+    const want_audio = !!opt.audio;
+
+    const was_playing = clock.running || !!(m && !m.paused && !m.ended);
+    const prev_pos = clock_t();
+
+    C.video_export_active = true;
+    video_export.blob = null; video_export.error = null;
+    video_export.done = 0; video_export.total = total;
+    video_export.status = "准备中…";
+    video_export.perf0 = 0;
+
+    let venc = null;
+    try {
+        if (m) pause();
+        preclick_notes(start);
+        /* 异象冻帧闩锁（glitchDog 的 freezeTime）：从冻结点之后开渲时预置成「已冻结」，
+           否则「冻帧当帧」的亮度/对比度 snap 会错跑到片段第一帧。 */
+        if (C.fx_eff && C.fx_eff.scalars && C.fx_eff.scalars.freezeTime != null) {
+            C.fx_eff._frozen = start >= C.fx_eff.scalars.freezeTime;
+        }
+        resize_canvases(w, h);
+        render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
+
+        // ---- 音频轨：先离线渲完、编码完（几秒钟的活），chunks 攒着等视频同步入封装 ----
+        const aq = [];
+        let audio_meta = null;
+        if (want_audio && m && typeof AudioEncoder === "function") {
+            try {
+                video_export.status = "渲染音频…";
+                export_ui_progress(true);
+                const rendered = await render_audio_48k(m.currentSrc || m.src, start, end);
+                video_export.status = "编码音频…";
+                export_ui_progress(true);
+                const out = await encode_audio_48k(rendered);
+                if (out.error) throw out.error;
+                if (out.chunks.length) {
+                    const head = out.desc || opus_head_fallback(out.channels);
+                    const preskip = (head && head.length >= 12) ? (head[10] | (head[11] << 8)) : 312;
+                    audio_meta = {
+                        channels: out.channels,
+                        codec_private: head,
+                        codec_delay_ns: Math.round(preskip / 48000 * 1e9)
+                    };
+                    aq.push(...out.chunks);
+                }
+            } catch (e) {
+                console.warn("音频轨导出失败，继续无音轨导出：", e);
+                aq.length = 0;
+                audio_meta = null;
+            }
+        }
+
+        // ---- 视频轨编码器：VP9 优先，退 VP8 ----
+        video_export.status = "探测编码器…";
+        export_ui_progress(true);
+        let vcodec = null;
+        for (const c of ["vp09.00.10.08", "vp8"]) {
+            try {
+                const s = await VideoEncoder.isConfigSupported({
+                    codec: c, width: w, height: h, bitrate, framerate: fps
+                });
+                if (s.supported) { vcodec = c; break; }
+            } catch (e) { /* 不支持就试下一个 */ }
+        }
+        if (!vcodec) throw new Error("此浏览器没有可用的 VP9/VP8 编码器");
+
+        const gw = webm_writer({
+            width: w, height: h,
+            video_codec: vcodec.startsWith("vp09") ? "V_VP9" : "V_VP8",
+            frame_ns: Math.round(1e9 / fps),
+            audio: audio_meta,
+            duration_ms: (end - start) * 1000      // 先写进 Info：播放器看时长靠它
+        });
+
+        const vq = [];
+        let venc_err = null;
+        /* 按时间戳归并两轨再入封装，保证同一簇内块的时间单调
+           （音轨在视频之前整段就绪，只是在这里被拉平节奏） */
+        const pump = () => {
+            while (vq.length) {
+                if (aq.length && aq[0].timestamp <= vq[0].timestamp) gw.add_audio(aq.shift());
+                else gw.add_video(vq.shift());
+            }
+        };
+        venc = new VideoEncoder({
+            output: chunk => { vq.push(chunk); pump(); },
+            error: e => { venc_err = e; }
+        });
+        venc.configure({
+            codec: vcodec, width: w, height: h, bitrate, framerate: fps,
+            latencyMode: "quality"
+        });
+
+        video_export.status = "渲染视频…";
+        video_export.perf0 = performance.now();
+        const frame_us = 1e6 / fps;
+        const key_every = Math.max(1, Math.round(fps * 2));    // 2s 一个关键帧（也决定簇节奏）
+        for (let i = 0; i < total; i++) {
+            if (C.video_export_cancelled) throw new Error("已取消");
+            if (venc_err) throw venc_err;
+            render_frame_at(start + i / fps);
+            const frame = new VideoFrame(cv, {
+                timestamp: Math.round(i * frame_us),
+                duration: Math.round(frame_us),
+                alpha: "discard"
+            });
+            venc.encode(frame, { keyFrame: i % key_every === 0 });
+            frame.close();
+            video_export.done = i + 1;
+            export_ui_progress();
+            // 每帧让出（见 wait_encoder 注释）+ 背压；取消/编码器错误在这里抛
+            await wait_encoder(venc, () => {
+                if (C.video_export_cancelled) throw new Error("已取消");
+                if (venc_err) throw venc_err;
+            });
+        }
+        await venc.flush();
+        pump();
+        while (aq.length) gw.add_audio(aq.shift());
+
+        video_export.status = "封装中…";
+        export_ui_progress(true);
+        video_export.blob = gw.finish();
+        video_export.name = export_filename(w, h, fps);
+        video_export.status = "完成";
+        export_ui_progress(true);
+        return video_export.blob;
+    } catch (e) {
+        video_export.error = e;
+        throw e;
+    } finally {
+        try { if (venc && venc.state !== "closed") venc.close(); } catch (e) {}
+        C.video_export_active = false;
+        C.video_export_cancelled = false;
+        resize_to_window();
+        clock_seek(prev_pos);
+        reset_notes();
+        update_progress(prev_pos);
+        // 立刻按窗口尺寸重画一帧（后台标签页 rAF 可能被挂起，不能等它）
+        try { render_frame_at(clock_t()); } catch (e) {}
+        export_ui_progress(true);
+        if (was_playing && C.chart.music) { try { play(); } catch (e) {} }
+    }
+};
+
+/* ---- 导出面板 ---- */
+
+let export_ui_last = 0;
+const fmt_hms = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+const export_ui_progress = force => {
+    const now = performance.now();
+    if (!force && now - export_ui_last < 120) return;    // 别每帧都摸 DOM
+    export_ui_last = now;
+    const ve = video_export;
+    const pct = ve.total ? ve.done / ve.total : 0;
+    ui.export_progress_fill.style.width = `${(pct * 100).toFixed(2)}%`;
+    let txt = ve.status || "";
+    if (ve.done && ve.perf0) {
+        const sec = (now - ve.perf0) / 1000;
+        const sp = sec > 0.5 ? ve.done / sec : 0;
+        if (sp > 0) {
+            const eta = Math.max(0, (ve.total - ve.done) / sp);
+            txt += ` ${ve.done}/${ve.total} 帧 · ${sp.toFixed(1)} 帧/秒 · 剩余 ${fmt_hms(eta)}`;
+        } else {
+            txt += ` ${ve.done}/${ve.total} 帧`;
+        }
+    }
+    ui.export_status.textContent = txt;
+};
+
+const export_open = () => !ui.export_overlay.classList.contains("hidden");
+
+const auto_bitrate = (w, h, fps) => Math.max(1, Math.round(w * h * fps * 0.08 / 1e6));
+
+const export_collect_opt = () => ({
+    width: parseInt(ui.export_w.value, 10) || 1920,
+    height: parseInt(ui.export_h.value, 10) || 1080,
+    fps: parseInt(ui.export_fps.value, 10) || 60,
+    bitrate: parseFloat(ui.export_bitrate.value) || 0,
+    start: Math.max(0, parseFloat(ui.export_start.value) || 0),
+    end: (parseFloat(ui.export_end.value) > 0)
+        ? parseFloat(ui.export_end.value) : (C.chart.duration || 0),
+    audio: ui.export_audio.checked
+});
+
+const export_est_update = () => {
+    const o = export_collect_opt();
+    const dur = Math.max(0, o.end - o.start);
+    const n = Math.max(1, Math.ceil(dur * o.fps));
+    const mbps = o.bitrate > 0 ? o.bitrate : auto_bitrate(o.width, o.height, o.fps);
+    const mb = mbps * 1e6 / 8 * dur / 1048576;
+    ui.export_est.textContent =
+        `约 ${n} 帧 · ${mbps} Mbps${o.bitrate > 0 ? "" : "（自动）"} · 预计 ${mb.toFixed(0)} MB`;
+};
+
+const open_export_panel = () => {
+    if (export_open() || C.video_export_active || lib_loading) return;
+    if (!C.chart || !C.chart.data) return;
+    pause();
+    ui.start_overlay.classList.add("hidden");
+    ui.export_end.value = (C.chart.duration || 0).toFixed(2);
+    ui.export_bitrate.value = auto_bitrate(
+        parseInt(ui.export_w.value, 10) || 1920,
+        parseInt(ui.export_h.value, 10) || 1080,
+        parseInt(ui.export_fps.value, 10) || 60);
+    ui.export_progress_wrap.classList.add("hidden");
+    ui.export_status.textContent = "";
+    export_est_update();
+    ui.export_overlay.classList.remove("hidden");
+};
+
+const close_export_panel = () => {
+    if (!export_open() || C.video_export_active) return;
+    ui.export_overlay.classList.add("hidden");
+    if (!chart_started) ui.start_overlay.classList.remove("hidden");
+};
+
+const export_cancel = () => {
+    if (!C.video_export_active) return;
+    C.video_export_cancelled = true;
+    ui.export_status.textContent = "正在取消…";
+};
+
+const export_run_ui = async () => {
+    if (C.video_export_active) return;
+    ui.export_go.disabled = true;
+    ui.export_cancel.disabled = false;
+    ui.export_progress_wrap.classList.remove("hidden");
+    ui.export_status.textContent = "准备中…";
+    try {
+        const blob = await export_video(export_collect_opt());
+        ui.export_status.textContent =
+            `完成：${video_export.name}（${(blob.size / 1048576).toFixed(1)} MB），开始下载`;
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = video_export.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+    } catch (e) {
+        ui.export_status.textContent = `导出失败：${(e && e.message) || e}`;
+        console.error("视频导出失败：", e);
+    } finally {
+        ui.export_go.disabled = false;
+        ui.export_cancel.disabled = true;
+    }
 };
 
 /* ---------------- 谱面装载 ---------------- */
@@ -2525,6 +3189,11 @@ const seek = v => {
     update_progress(v);
 };
 
+/* ---------------- 底栏显隐 ---------------- */
+// 底栏默认隐藏（index.html 的 #bottom-bar 初始就带 hidden），B 键切换：
+// 播放时底栏会压住画面下沿，隐藏后更接近原版观感；要看进度/换谱时按 B 调出来。
+const toggle_bottom_bar = () => ui.bottom_bar.classList.toggle("hidden");
+
 /* ---------------- 谱面库 ---------------- */
 let chart_started = false;
 let render_started = false;
@@ -2609,22 +3278,8 @@ window.onload = async () => {
     C.block_cv = document.createElement("canvas");
     C.block_sub_cv = document.createElement("canvas");
 
-    const resize = () => {
-        cv.width = window.innerWidth;
-        cv.height = window.innerHeight;
-        C.scene_cv.width = cv.width;
-        C.scene_cv.height = cv.height;
-        C.bg_cv.width = cv.width;
-        C.bg_cv.height = cv.height;
-        // 方块 mask 按原版 RT 尺寸 w/8 × h/8 光栅化（HANDOFF §3.1：那几对 mask RT 全是
-        // w/8、Point，compose 也跑在 /8 上）。>> 3 就是原版 Start 里的 v31>>3 / v32>>3。
-        C.block_cv.width = Math.max(1, cv.width >> 3);
-        C.block_cv.height = Math.max(1, cv.height >> 3);
-        C.block_sub_cv.width = C.block_cv.width;
-        C.block_sub_cv.height = C.block_cv.height;
-    };
-    resize();
-    window.onresize = resize;
+    resize_to_window();
+    window.onresize = resize_to_window;
 
     C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"));
     C.click_sounds[C.note.hold] = C.click_sounds[C.note.tap];
@@ -2714,12 +3369,53 @@ window.onload = async () => {
         if (e.target === ui.library_overlay) close_library();
     };
 
+    /* 导出视频面板 */
+    ui.btn_export.onclick = open_export_panel;
+    ui.export_close.onclick = close_export_panel;
+    ui.export_overlay.onclick = e => {
+        if (e.target === ui.export_overlay) close_export_panel();
+    };
+    for (const key of ["export_w", "export_h", "export_fps", "export_bitrate", "export_start", "export_end"]) {
+        ui[key].addEventListener("input", export_est_update);
+    }
+    ui.export_audio.addEventListener("change", export_est_update);
+    ui.export_p720.onclick = () => { ui.export_w.value = "1280"; ui.export_h.value = "720"; export_est_update(); };
+    ui.export_p1080.onclick = () => { ui.export_w.value = "1920"; ui.export_h.value = "1080"; export_est_update(); };
+    ui.export_pwin.onclick = () => {
+        ui.export_w.value = String(window.innerWidth);
+        ui.export_h.value = String(window.innerHeight);
+        export_est_update();
+    };
+    ui.export_whole.onclick = () => {
+        ui.export_start.value = "0";
+        ui.export_end.value = (C.chart.duration || 0).toFixed(2);
+        export_est_update();
+    };
+    ui.export_here.onclick = () => {
+        ui.export_start.value = clock_t().toFixed(2);
+        ui.export_end.value = (C.chart.duration || 0).toFixed(2);
+        export_est_update();
+    };
+    ui.export_go.onclick = export_run_ui;
+    ui.export_cancel.onclick = export_cancel;
+
     ui.progress_wrap.onclick = e => {
         const r = ui.progress_wrap.getBoundingClientRect();
         seek((e.clientX - r.left) / r.width * C.chart.duration);
     };
 
     window.onkeydown = e => {
+        if (C.video_export_active) {
+            if (e.code === "Escape") { e.preventDefault(); export_cancel(); }
+            return;                      // 导出期间锁输入：空格/方向键别去碰播放时钟
+        }
+        if (export_open()) {
+            if (e.code === "Escape" || e.code === "Space") {
+                e.preventDefault();
+                close_export_panel();
+            }
+            return;
+        }
         if (library_open()) {
             if (e.code === "Space" || e.code === "Escape") {
                 e.preventDefault();
@@ -2738,6 +3434,10 @@ window.onload = async () => {
             seek(get_time() + 2);
         } else if (e.code === "KeyL") {
             open_library();
+        } else if (e.code === "KeyV") {
+            open_export_panel();
+        } else if (e.code === "KeyB") {
+            toggle_bottom_bar();
         }
     };
 
