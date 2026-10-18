@@ -246,6 +246,42 @@ const fx_load_wirenoise = async (F, layers) => {
     }
 };
 
+/* 把 glitch 噪声图上传到 F.noise（Point+Repeat 由 mk_tex(true,true) 建纹理时设好，
+   texImage2D 不会改采样参数）。带缓存守卫：按 img 对象身份比对，换图才重传。
+   ★ audit F2（2026-10-06 修复）：原先唯一上传入口在 apply_postfx 的 if (!C.fx)
+     首建分支里，两头都坏 —— ① fx_load_anomaly 先把 C.fx 建好 ⇒ 分支永不执行，
+     而异象谱 postfx=null ⇒ C.glitch_img=null ⇒ F.noise 始终是无存储空纹理；
+     ② 切谱（含 normal↔anomaly 互切）时 C.fx 已存在 ⇒ 换了 glitchTex 也不重传。 */
+const fx_upload_noise = (F, img) => {
+    if (!F || !img || F.noise_src === img) return;
+    const gl = F.gl;
+    gl.bindTexture(gl.TEXTURE_2D, F.noise);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+    F.noise_src = img;
+};
+
+/* 方块噪声图的守卫式上传（BlockNoise1 = 位移图 / PointNoise = 火花图）。
+   ★ 2026-10-17 修复：原先唯一上传入口在 apply_postfx 的 if (!C.fx) 首建分支里，
+     与 glitch 噪声同款 bug（audit F2）——异象流程 fx_load_anomaly 会先把 C.fx 建好
+     ⇒ 分支永不执行，u_disp/u_spark 永远是无存储空纹理：
+       位移变「恒定偏移」（方块边缘纯直、整体错位），火花点全灭（红场变平色）。
+     浏览器实测：手动重传后锯齿边 + 红色噪点场立现，与实机录像同族。 */
+const fx_upload_block = (F) => {
+    if (!F) return;
+    const gl = F.gl;
+    const dtex = C.block.imgs.displace, stex = C.block.imgs.spark;
+    if (dtex && F.block_disp_src !== dtex) {
+        gl.bindTexture(gl.TEXTURE_2D, F.displace);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dtex);
+        F.block_disp_src = dtex;
+    }
+    if (stex && F.block_spark_src !== stex) {
+        gl.bindTexture(gl.TEXTURE_2D, F.spark);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, stex);
+        F.block_spark_src = stex;
+    }
+};
+
 /* 载入某个异象（res/effects/<name>.json）及其贴图，存到 C.fx_eff。
    ★ load_chart 跑的时候 C.fx 可能还没初始化（fx_init 是首次渲染时才懒初始化的），
      所以这里自己确保一次 —— 否则首屏选谱时异象会静默不生效。 */
@@ -268,6 +304,13 @@ const fx_load_anomaly = async (name) => {
 
     const gl = F.gl;
     eff._frozen = false;
+
+    /* F2（audit 2026-10-06 修复）：异象 glitch 噪声贴图。原版三首各引
+       Glitch4in1_{2,0,1}.png（Hate/DS/Message prefab 的 glitchTex guid 实测），
+       但三张 PNG 字节全同（md5 a75e842efeeb23644766b5b7fa468af6，512×512 RGB，
+       .meta filterMode:0 / wrapU,V:2 = Point+Repeat）⇒ 只提取一份共用。
+       ★ 必须在这里上传：apply_postfx 首建分支不会执行（本函数已先建 C.fx）。 */
+    fx_upload_noise(F, await load_img(R("/res/effects/glitch4in1.png")));
 
     // GlitchDog 的两张图（三首共用）
     const gd = [await load_img(R("/res/effects/glitchdog_glitchmap.png")),
@@ -880,7 +923,8 @@ const render_blocks = (sctx, t) => {
      fx.vert           全屏三角形
      glitch.frag       ≈ PostEffects_Glitch
      rgbshift.frag     ≈ PostEffects_RGBShift
-     vignette.frag     ≈ PostEffects_VignettePlus
+     vignette.frag     ≈ PostEffects_VignettePlus（应用趟）
+     vignette_noise.frag ≈ PostEffects_VignettePlus（噪声生成趟，半分辨率 RT）
      esc.frag          ≈ PostEffects_ESCContol
      copy.frag         直通拷贝
      block_disp.glsl   位移场（被下面几个 include）
@@ -906,6 +950,7 @@ const SHADER_FILES = {
     glitch:      "glitch.frag",
     rgbShift:    "rgbshift.frag",
     vignette:    "vignette.frag",
+    vignetteNoise: "vignette_noise.frag",
     esc:         "esc.frag",
     copy:        "copy.frag",
     // 首玩异象
@@ -1059,10 +1104,21 @@ const fx_init = () => {
         wireNoise: (() => { const t = gl.createTexture(); return t; })(),
         kaleidoNormal: mk_tex(false, false),
         kaleidoTrans: mk_tex(false, false),
+        /* VignettePlus 噪声 RT（原版 Renderer 每次 GetTemporary 的那张）：
+           尺寸 = 画面 × noiseSampleRate（hate/Message 0.5 = 半分辨率），LINEAR+CLAMP
+           （Unity 临时 RT 默认 Bilinear/Clamp）。懒分配：尺寸由 vignette 那趟按当前
+           曲线的 noiseSampleRate 算（见 fx_render_anomaly），窗口变了自动重开。
+           noise_w/h = 当前已分配尺寸（0 = 还没建过）。 */
+        noiseRT: mk_tex(false, false),
+        noise_w: 0, noise_h: 0,
         /* 分层渲染（异象）：fg = note 层画布上传的目标（背景层在 tex[0/1] 里 ping-pong，
-           合成一趟 base+over 需要第三张纹理）；gridTex = DS 网格的 _MainTex(FrameBase_0)。 */
+           合成一趟 base+over 需要第三张纹理）；gridTex = DS 网格的 _MainTex(FrameBase_0)。
+           ★ gridTex 必须 REPEAT（mk_tex(true,..)）：dsgrid.frag 按 _MainTex_ST=(10,10)
+             平铺采样 uv∈[0,10]，且原版 FrameBase_0.png.meta 的 wrapU/wrapV=0（Repeat）。
+             用 CLAMP 会把超出 [0,1] 的 ~90% 屏面钳采到贴图白色边框线 ⇒ 10×10 格子阵列
+             变成整屏白灰雾（2026-10-05 同帧 A/B 实测，见 _analysis\anomaly_audit_20261005.md 补录）。 */
         fg: mk_tex(false, false),
-        gridTex: mk_tex(false, false),
+        gridTex: mk_tex(true, false),
         fbo: gl.createFramebuffer(),
         w: 0, h: 0,
         caps: { has_texpack, has_deriv, is_gl2: !!gl2 },
@@ -1070,6 +1126,7 @@ const fx_init = () => {
             glitch: fx_program(gl, SH.glitch),
             rgbShift: fx_program(gl, SH.rgbShift),
             vignette: fx_program(gl, SH.vignette),
+            vignetteNoise: fx_program(gl, SH.vignetteNoise),
             esc: fx_program(gl, SH.esc),
             copy: fx_program(gl, SH.copy),
             bLayers: fx_program(gl, SH.block_layers),
@@ -1301,11 +1358,18 @@ const glitch_dirs = t => {
 };
 
 /* ---------------- 首玩异象渲染 ----------------
-   pass 顺序 = *LevelEffects.prefab 里各 settings 字段的声明顺序，
-   因为 PostProcessingManager.OnRenderImage @0x1DBD01C 按 postEffects 列表
-   依次执行，而运行时该列表由 LevelEffects 按字段序填入
-   （实测见 _analysis\postfx_pass_order.txt：Hate prefab 的顺序是
-     Glitch -> ESCContol -> VignettePlus -> RGBShift -> LensDistortion）。
+   pass 顺序 = 运行时 postEffects 列表序 = *LevelEffects.Start() 里 AddEffect
+   的调用序（2026-10-18 反编译核实：PostProcessingManager.AddEffects @0x1DAD898
+   把效果追加到列表尾，OnRenderImage @0x1DBD01C 按列表序依次执行）。
+   ★ 别再拿 prefab 的字段声明序当真（_analysis\postfx_pass_order.txt 记的是
+     YAML 里的引用序，和 Start() 的调用序不同，此前端口就是按它排错的）：
+     Hate    : Glitch -> RGBShift -> VignettePlus -> LensDistortion -> ColorBalance
+     DS      : RGBShift -> Glitch -> GlitchDog -> LensDistortion -> Bloom -> DimensionSlash -> VignettePlus
+     Message : Glitch -> ColorBalance -> LightBand -> Bloom -> VignettePlus -> LensDistortion
+   其中 Hate 的 ColorBalance（ESC）排在 VignettePlus 之后是关键：contrast
+   121.63 起 1.3、159.72 起 1.8 ⇒ 把 VP 抬起来的噪声暗部（max(col, noise*0.4)）
+   又压回黑（(x-0.5)*1.8+0.5，x<0.222 直接归零），late 段屏幕上只剩稀疏细雪；
+   端口此前把 colorBalance 排在 VP 前面，噪声没被压 —— 就是一整片亮雪花。
    各曲线的求值统一走上面的 director_eval（ease 表 / Hermite / clamp）。 */
 
 /* GlitchDog：DS 的核心 pass。需要 displaceMap / glitchMap / wireNoise 三张图。 */
@@ -1398,21 +1462,29 @@ const fx_pass_dimslash = (F, cur, eff, t) => {
     return 1 - cur;
 };
 
-/* LightBand：Message 的横向光带。
+/* LightBand：Message 的反色光带（带内 ≈ 负片，bandWidth 0→1 = 反色区展开到全屏）。
    ★ bandNormal 不在 settings 里（LightBandSettings 只有 bandPos/bandDir/bandWidth/
-     bandSmoothness/bandBrightness，见 dump.cs TypeDefIndex 4101），它是
-     SetMaterialData 每帧用 bandDir（弧度）算出来的单位法线：
-         _BandNormal = (cos(bandDir), sin(bandDir))
-     prefab 里 bandDir = 0 ⇒ 法线 = (1, 0)，即光带是**竖直**的一条（沿 x 方向的法线
-     ⇒ 沿 y 方向延伸）。别写成 (0,1)，那会把光带转 90 度。 */
+     bandSmoothness/bandBrightness，见 dump.cs TypeDefIndex 4101），它是 SetMaterialData
+     每帧写进材质的。原版实测（idalib 反编译，2026-10-06）：
+       重载 SetMaterialData(mat) @0x1DBC658：aspect = width / height；
+       私有 SetMaterialData(mat, aspect) @0x1DBC510：
+         sincosf(angle = bandDir × 0.017453)   // ★ bandDir 是【度】不是弧度
+                                                //   glibc/bionic: sincosf(x, sinp, cosp)
+                                                //   sin → &a15+4，cos → &a15
+         _BandPos    = (bandPos.x, bandPos.y)  // 不乘 aspect
+         _BandNormal = (-sin(bandDir°) × aspect,  cos(bandDir°))   // dir 的【垂线】
+     bandDir = 0° ⇒ 法线 = (0,1) ⇒ 光带是**横向**的，从中线向上/下展开。
+     ⚠ 曾错写成 (cos,sin)（把带方向当成了法线 = 转 90°：竖带左右展开），
+       且注释错标「弧度」、缺 aspect —— 2026-10-06 用户报「展开方向错了」后按反编译改正。 */
 const fx_pass_lightband = (F, cur, eff, t) => {
     const st = eff_settings(eff, "lightBand", t) || {};
     const bp = st.bandPos || { x: 0.5, y: 0.5 };
-    const dir = st.bandDir ?? 0;
+    const rad = (st.bandDir ?? 0) * Math.PI / 180;   // 原版 bandDir 以度为单位
+    const aspect = (F.w && F.h) ? F.w / F.h : 1;     // 原版 SetMaterialData(mat, w/h)
     fx_pass(F.prog.lightBand, F.tex[1 - cur], (p, g) => {
         fx_bind(g, 0, F.tex[cur], p.loc.u_src);
         g.uniform2f(p.loc.u_bandPos, bp.x, bp.y);
-        g.uniform2f(p.loc.u_bandNormal, Math.cos(dir), Math.sin(dir));
+        g.uniform2f(p.loc.u_bandNormal, -Math.sin(rad) * aspect, Math.cos(rad));
         g.uniform1f(p.loc.u_bandWidth, st.bandWidth ?? 0);
         g.uniform1f(p.loc.u_bandSmooth, st.bandSmoothness ?? 0);
         g.uniform1f(p.loc.u_bandBright, st.bandBrightness ?? 1);
@@ -1506,12 +1578,12 @@ const fx_layer_bg = (F, cur, eff, t) => {
     return cur;
 };
 
-/* 主调度：按各曲线的 prefab 字段顺序跑一遍。
+/* 主调度：按 eff.order（= 运行时 postEffects 列表序，见文件头注释）依次跑。
    常规效果（glitch / rgbShift / vignette / esc）复用已有 shader，
    异象专有的四个走各自的移植版。
    ★ 黑幕/kaleido/网格不在这里跑 —— 它们属于背景层，在 fx_layer_bg 里
-     （note 层合成之前）执行；order 数组里残留的 "kaleido" 条目没有对应
-     case，落到空分支被忽略（order 保留原样 = prefab 字段声明序的记录）。 */
+     （note 层合成之前）执行；它们本来也不在 postEffects 列表里，
+     order 数组只有运行时效果链（message 里旧的 "kaleido" 条目已清掉）。 */
 const fx_render_anomaly = (F, cur, eff, t) => {
     const gl = F.gl;
     const S = eff.settings;
@@ -1558,24 +1630,57 @@ const fx_render_anomaly = (F, cur, eff, t) => {
             case "vignettePlus": {
                 const st = eff_settings(eff, "vignettePlus", t) || {};
                 const c = st.center || { x: 0.5, y: 0.5 };
+                /* 噪声先烘：原版 Renderer 在 noiseBrightness>0 时每次
+                   GetTemporary((int)(w*rate), (int)(h*rate)) → blit 生成趟 → blit 应用趟。
+                   幅度（×_NoiseBrightness/_NoiseSaturation）烘在 RT 里，应用趟只当它开关。 */
+                const nb = st.noiseBrightness ?? 0;
+                if (nb > 0) {
+                    const rate = st.noiseSampleRate ?? 0.5;
+                    const nw = Math.max(1, Math.floor(F.w * rate));
+                    const nh = Math.max(1, Math.floor(F.h * rate));
+                    if (F.noise_w !== nw || F.noise_h !== nh) {
+                        gl.bindTexture(gl.TEXTURE_2D, F.noiseRT);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, nw, nh, 0,
+                                      gl.RGBA, gl.UNSIGNED_BYTE, null);
+                        F.noise_w = nw; F.noise_h = nh;
+                    }
+                    fx_pass(F.prog.vignetteNoise, F.noiseRT, (p, g) => {
+                        g.uniform1f(p.loc.u_time, t);
+                        g.uniform1f(p.loc.u_noiseBright, nb);
+                        g.uniform1f(p.loc.u_noiseSat, st.noiseSaturation ?? 1);
+                    }, [nw, nh]);
+                }
+                /* 应用趟：噪声+扫描线（曲线驱动 noiseBrightness/lineOpacity，
+                   hate 全程 0.36→0.8→1.5 / 0.02→0.1）。
+                   late 段链尾还有 ESC（contrast 1.3→1.8）会把这层噪声压回黑，
+                   hate 的 order 里 colorBalance 排在 vignettePlus 之后，别调换。 */
                 fx_pass(F.prog.vignette, F.tex[1 - cur], (p, g) => {
                     fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+                    fx_bind(g, 1, F.noiseRT, p.loc.u_noiseTex);
                     g.uniform1f(p.loc.u_radius, st.radius ?? 1);
                     g.uniform1f(p.loc.u_smooth, st.smoothness ?? 1);
                     g.uniform1f(p.loc.u_darkness, st.darkness ?? 1);
                     g.uniform2f(p.loc.u_center, c.x, c.y);
+                    g.uniform1f(p.loc.u_noiseBright, nb);
+                    g.uniform1f(p.loc.u_lineOpacity, st.lineOpacity ?? 0);
                 });
                 cur = 1 - cur;
                 break;
             }
             case "colorBalance": {
                 const st = eff_settings(eff, "colorBalance", t) || {};
+                /* ESC（Exposure_Saturate_ContrastSettings）三条：
+                   rgb = avg + contrast * (satMix - avg)，再乘 brightness。
+                   avg 是 settings.averageColor（prefab 静值 0.5,0.5,0.5）——
+                   以前端口硬传 (0,0,0)，contrast>1 时支点错到 0 ⇒ 暗场整体提亮、
+                   高光更容易削顶（hate 165.5 的中央光柱被推成纯白即此因）。 */
+                const av = st.averageColor || { r: 0.5, g: 0.5, b: 0.5 };
                 fx_pass(F.prog.esc, F.tex[1 - cur], (p, g) => {
                     fx_bind(g, 0, F.tex[cur], p.loc.u_src);
                     g.uniform1f(p.loc.u_brightness, st.brightness ?? 1);
                     g.uniform1f(p.loc.u_saturation, st.saturation ?? 1);
                     g.uniform1f(p.loc.u_contrast, st.contrast ?? 1);
-                    g.uniform3f(p.loc.u_average, 0, 0, 0);
+                    g.uniform3f(p.loc.u_average, av.r, av.g, av.b);
                 });
                 cur = 1 - cur;
                 break;
@@ -1585,14 +1690,23 @@ const fx_render_anomaly = (F, cur, eff, t) => {
                 const c = st.center || { x: 0.5, y: 0.5 };
                 const conv = st.convergence ?? 0;
                 if (conv === 0) continue;          // 无畸变就别占一趟
+                /* ★ 2026-10-18：C# 绑定侧对 _Size/_Convergence 各乘 0.01
+                   （LensDistortionSettings.SetMaterialData(mat, aspect) @0x1DBBE94：
+                     LDR S9,[0xC3477C]（= 0x3C23D70A = 0.01f）→ FMUL size×S9 → SetFloat(_Size)；
+                     同常量再 FMUL convergence —— edgeSmoothness/aspect 直传）。
+                   之前拿资产原值 80/−8 直接绑：r = dist/(60)·… 畸变项 8r² ~ 1e-3，
+                   整趟退化成「贴边 2.5% 淡出」，视频里那条又宽又硬的鱼眼黑框根本出不来。
+                   缩放后 _Size=0.8、_Conv=−0.08 ⇒ 采样坐标外移 k=1+0.08r²，可见画面收进
+                   中央 ~91%，四边出现 ~4.5%（L/R）/ ~3%（T/B）黑框 + 外圈可见压缩畸变，
+                   与视频 v198 实测（L 0.0451 / T 0.0315）逐点吻合。 */
                 const aspect = st.useScreenAspect
                     ? (F.w / Math.max(1, F.h))
                     : (st.manualAspect ?? 1);
                 fx_pass(F.prog.lensDist, F.tex[1 - cur], (p, g) => {
                     fx_bind(g, 0, F.tex[cur], p.loc.u_src);
                     g.uniform2f(p.loc.u_center, c.x, c.y);
-                    g.uniform1f(p.loc.u_size, st.size ?? 100);
-                    g.uniform1f(p.loc.u_convergence, conv);
+                    g.uniform1f(p.loc.u_size, (st.size ?? 100) * 0.01);
+                    g.uniform1f(p.loc.u_convergence, conv * 0.01);
                     g.uniform1f(p.loc.u_aspect, aspect);
                     g.uniform1f(p.loc.u_edgeSmooth, st.edgeSmoothness ?? 0.025);
                 });
@@ -1621,19 +1735,26 @@ const fx_render_anomaly = (F, cur, eff, t) => {
             }
             case "glitchDog": {
                 const st = eff_settings(eff, "glitchDog", t) || {};
-                /* DS 的 freeze：nowTime >= freezeTime 之后这五个量被固定成
-                   （参考 _analysis\_sample_focus.txt 里 freeze 那行，是**状态谓词**：
-                   146.752 active=False / 146.753 active=True，往回拖也应还原）。
-                   之前写成 `!eff._frozen` 才覆值 = 只有跨过 freezeTime 的那一帧生效，
-                   之后每帧 st 都从曲线重算，冻结其实立刻就失效了。 */
+                /* DS 的 freeze（2026-10-17 字节级复核后重写，见 _analysis\anomaly_audit_20261017.md）：
+                   原版在 nowTime >= freezeTime 时跑一次冻结块（freezed 闩锁 @+0x17C，位于所有
+                   director 求值之后），写五个字段 ——
+                     · noiseMoveSpeed=0 / noiseEvolveSpeed=0 / displaceSpeed=0.0：这三个没有曲线
+                       驱动，写一次后原版永久生效 ⇒ 端口用状态谓词每帧覆写来等效（往回拖可还原）；
+                     · glitchMapBrightness=1.6（0x3FCCCCCD）/ glitchMapContrast=3.5（0x40600000）：
+                       下一帧就被 AnimationDirector 曲线覆回（brightness 1.5 → 147.98 起 1.6/0
+                       闪烁、contrast 0.5 → 146.99 起 3.5）⇒ 只在冻帧当帧 snap，不持续覆写。
+                   旧注释引用的 _sample_focus.txt「0.4/0/4」是 resolve_effect_params.py 的硬编码
+                   误读（真值 0.0/1.6/3.5），源头（报告 §3.2 / resolve / main.js）已一并修正。 */
                 const ft = eff.scalars ? eff.scalars.freezeTime : null;
                 const active = ft !== null && ft !== undefined && t >= ft;
                 if (active) {
                     st.noiseMoveSpeed = 0;
                     st.noiseEvolveSpeed = 0;
-                    st.displaceSpeed = 0.4;
-                    st.glitchMapBrightness = 0;
-                    st.glitchMapContrast = 4;
+                    st.displaceSpeed = 0;
+                    if (!eff._frozen) {          // 冻帧当帧：复刻原版那一帧的 1.6 / 3.5
+                        st.glitchMapBrightness = 1.6;
+                        st.glitchMapContrast = 3.5;
+                    }
                 }
                 eff._frozen = active;
                 cur = fx_pass_glitchdog(F, cur, eff, t, st);
@@ -1658,10 +1779,12 @@ const fx_render = (src_canvas, t, bg_canvas) => {
     const K = pf ? pf.curves : null;
 
     const eff = C.fx_eff;
-    /* 分层模式（异象）：bg_canvas=只有曲绘的背景画布，src_canvas=判定线+note 层。
-       背景层先入 tex[0] 走方块/黑幕/kaleido/网格，再把 note 层 alpha-over 合回来。
-       普通谱没有 bg_canvas，照旧整帧入 tex[0]。 */
-    const split = !!(bg_canvas && eff);
+    /* 分层模式（F5 后：异象 **或** 带方块的谱）：bg_canvas=只有曲绘的背景画布，
+       src_canvas=判定线+note 层。背景层先入 tex[0] 走 disabled/黑幕/kaleido/网格，
+       再把 note 层 alpha-over 合回来 —— disabled 因此回到 note/线之下
+       （原版 BackCanvas B/2 层序，audit F5，2026-10-06 修复）。
+       无 bg_canvas（非异象且无方块 / fx 不可用）照旧整帧入 tex[0]。 */
+    const split = !!bg_canvas;
 
     gl.bindTexture(gl.TEXTURE_2D, F.tex[0]);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE,
@@ -1673,15 +1796,16 @@ const fx_render = (src_canvas, t, bg_canvas) => {
         cur = 1 - cur;
     };
 
-    // 方块先压进场景，后期特效再作用于整张画面。
-    // 顺序有讲究（HANDOFF §10.1）：
-    //   ① fx_cov        compose → bcov（layers 和 ring 都吃它）
-    //   ② bLayers       scene += covG×fillD，写另一张 tex 以免读写同一张
-    //   ③ copy → scene6 /6 Point 快照 = apply 的 hue 源，必须在 layers 之后（含 disabled 层）
-    //   ④ fx_blocks     ring + apply（apply 的 u_src 也取含 layers 的这一张）
+    // ① disabled/ready 方块先压进背景场景（HANDOFF §10.1：compose → layers）。
+    //    fx_cov 只吃 canvas mask（block_cv/block_sub_cv，render_scene 里画的），与层序无关；
+    //    bLayers 把 disabled 填色烘进 tex —— 在异象分层里它必须在黑幕/kaleido/网格**之前**，
+    //    对应原版 BackCanvas(B/2) 在 effect Canvas(B/3) 之下（audit §2.1 层序）。
+    //    ★ active 方块（fx_blocks）不在这里跑：原版走主相机 CameraEvent=18（BeforeImageEffects），
+    //      快照 = 已含黑幕+判定线+note 的整帧，压在全部之上（audit F1，2026-10-06 修复）。
+    //      split 模式（异象或普通方块谱）下它挪到 fg 合成之后（eff 分支 ④ / 下面 F5 分支）；
+    //      非 split 只剩「无方块或 fx 不可用」—— tex[0] 本身就是含 note 的整帧。
     if (C.block_live) {
         const tx = t / 20;
-        const vp6 = [rt_dim(F.w, 6), rt_dim(F.h, 6)];   // 必须与 apply_postfx 的 set(scene6) 同表达式
         const D = C.block.disabled;
 
         fx_cov(t);
@@ -1701,10 +1825,14 @@ const fx_render = (src_canvas, t, bg_canvas) => {
         });
         cur = 1 - cur;
 
-        fx_pass(F.prog.copy, F.scene6, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src), vp6);
-
-        fx_blocks(t, F.tex[cur], F.tex[1 - cur]);
-        cur = 1 - cur;
+        // 非分层路径（bg_canvas=null）：快照 + active 在这里（原顺序）；
+        // split 路径（异象或普通方块谱）挪到 fg 合成之后（eff 分支 ④ / 下面 F5 分支）。
+        if (!bg_canvas) {
+            const vp6 = [rt_dim(F.w, 6), rt_dim(F.h, 6)];   // 必须与 apply_postfx 的 set(scene6) 同表达式
+            fx_pass(F.prog.copy, F.scene6, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src), vp6);
+            fx_blocks(t, F.tex[cur], F.tex[1 - cur]);
+            cur = 1 - cur;
+        }
     }
 
     /* 首玩异象（Chapter9 baseline 的 LevelEffects）走独立分支：
@@ -1712,7 +1840,7 @@ const fx_render = (src_canvas, t, bg_canvas) => {
        ★ fx_render_anomaly 沿用 run() 的约定：画面始终在 tex[cur]。 */
     if (eff) {
         if (split) {
-            // ① 背景层效果（黑幕/kaleido/网格）—— 作用在曲绘上，note 还没进来
+            // ① 背景层效果（黑幕/kaleido/网格）—— 作用在曲绘+disabled 方块上，note 还没进来
             cur = fx_layer_bg(F, cur, eff, t);
             // ② 判定线+note 层盖回来（新建的 alpha-over 一趟）
             gl.bindTexture(gl.TEXTURE_2D, F.fg);
@@ -1722,6 +1850,16 @@ const fx_render = (src_canvas, t, bg_canvas) => {
                 fx_bind(g, 1, F.fg, p.loc.u_over);
             });
             cur = 1 - cur;
+            // ④ active 方块 = 原版 CameraEvent 18：对含【曲绘+disabled+黑幕/kaleido/网格+线+note】
+            //    的整帧快照做合成，压在全部之上（fix audit F1：之前垫底 ⇒ Message 黑幕≡1 时
+            //    方块整曲被吞、DS 前 65s 被 0.8 黑幕压暗 80%）。scene6 快照同步后移，
+            //    apply 的 hue 源因此含 note/黑幕（audit §2.3 第 2 行「内容缺失」一并修正）。
+            if (C.block_live) {
+                const vp6 = [rt_dim(F.w, 6), rt_dim(F.h, 6)];
+                fx_pass(F.prog.copy, F.scene6, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src), vp6);
+                fx_blocks(t, F.tex[cur], F.tex[1 - cur]);
+                cur = 1 - cur;
+            }
         }
         // ③ 整帧后处理链（lightBand/glitch/... 照旧跑在合成后的画面上）
         cur = fx_render_anomaly(F, cur, eff, t);
@@ -1731,6 +1869,26 @@ const fx_render = (src_canvas, t, bg_canvas) => {
            有 pass 时则永远丢掉最后一趟效果。 */
         fx_pass(F.prog.copy, null, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src));
         return;
+    }
+
+    /* F5（audit 2026-10-06 修复）：非异象但走分层的谱（普通方块谱）——
+       ① 判定线+note 层 alpha-over 盖回「曲绘+disabled」之上；
+       ② scene6 快照 + active 方块压在最上（与 eff split 分支 ④ 同序：
+          原版 active 走 CameraEvent=BeforeImageEffects，快照含 note/线）。 */
+    if (split) {
+        gl.bindTexture(gl.TEXTURE_2D, F.fg);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src_canvas);
+        fx_pass(F.prog.over, F.tex[1 - cur], (p, g) => {
+            fx_bind(g, 0, F.tex[cur], p.loc.u_base);
+            fx_bind(g, 1, F.fg, p.loc.u_over);
+        });
+        cur = 1 - cur;
+        if (C.block_live) {
+            const vp6 = [rt_dim(F.w, 6), rt_dim(F.h, 6)];
+            fx_pass(F.prog.copy, F.scene6, (p, g) => fx_bind(g, 0, F.tex[cur], p.loc.u_src), vp6);
+            fx_blocks(t, F.tex[cur], F.tex[1 - cur]);
+            cur = 1 - cur;
+        }
     }
 
     if (!pf) {
@@ -1759,10 +1917,14 @@ const fx_render = (src_canvas, t, bg_canvas) => {
 
     run(F.prog.vignette, (p, g) => {
         fx_bind(g, 0, F.tex[cur], p.loc.u_src);
+        fx_bind(g, 1, F.noiseRT, p.loc.u_noiseTex);
         g.uniform1f(p.loc.u_radius, curve_val(K.vignetteRadius, t));
         g.uniform1f(p.loc.u_smooth, curve_val(K.vignetteSmoothness, t));
         g.uniform1f(p.loc.u_darkness, curve_val(K.vignetteDarkness, t));
         g.uniform2f(p.loc.u_center, cc.vignetteCenter[0], cc.vignetteCenter[1]);
+        /* 非异象谱不开噪声/扫描线（postfx.json 里也没有这组曲线；noiseRT 不会被采样）。 */
+        g.uniform1f(p.loc.u_noiseBright, 0);
+        g.uniform1f(p.loc.u_lineOpacity, 0);
     });
 
     run(F.prog.esc, (p, g) => {
@@ -1813,23 +1975,16 @@ const apply_postfx = (src, dst, t, bg) => {
             flat();
             return;
         }
-        const gl = C.fx.gl;
-        if (C.glitch_img) {
-            gl.bindTexture(gl.TEXTURE_2D, C.fx.noise);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, C.glitch_img);
-        }
-        const dtex = C.block.imgs.displace, stex = C.block.imgs.spark;
-        if (dtex) {
-            gl.bindTexture(gl.TEXTURE_2D, C.fx.displace);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dtex);
-        }
-        if (stex) {
-            gl.bindTexture(gl.TEXTURE_2D, C.fx.spark);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, stex);
-        }
+        // glitch / 方块噪声上传都已移出首建分支 → 统一走下面的守卫式上传
+        // （audit F2：首建分支对「异象先建 C.fx」「切谱换 glitchTex」都不执行/不重传；
+        //   2026-10-17：方块的 displace/spark 同款漏传 —— 位移变恒定偏移、火花点全灭）
     }
 
     const gl = C.fx.gl;
+    /* F2：噪声图守卫式上传 —— 按 img 身份比对，换谱/异象互切自动重传；
+       异象谱 C.glitch_img=null 时这里不动（glitch4in1 由 fx_load_anomaly 上传）。 */
+    fx_upload_noise(C.fx, C.glitch_img);
+    fx_upload_block(C.fx);
     if (C.fx.w !== w || C.fx.h !== h) {
         C.fx.w = w;
         C.fx.h = h;
@@ -1940,9 +2095,23 @@ const render_scene = (sctx, t, mode) => {
                 const note_tail_img = C.hold_tail_imgs[note.morebets];
                 const note_tail_height = this_note_width / note_tail_img.width * note_tail_img.height;
 
+                /* hold 体收缩量按【剩余时间】线性，不按 dist —— 原版 HoldControl::NoteMove
+                   （@0x1D83314，2026-10-06 反编译）holding 分支直接写 SpriteRenderer 局部缩放：
+                     y = note.speed × ((realTime + holdTime − nowTime) / 3.8 × 0.2) × LevelInformation.Speed
+                   即「长度 ∝ 距 hold 结束的剩余秒数」，全程不读 floorPosition；
+                   approach 分支（nowTime ≤ realTime）同式代入 remain=holdTime ⇒ 常量，点击瞬间严格连续。
+                   旧实现用 min(0, note_fp) 按线的 floorPosition 消费：常规段（line 值 speed==note.speed）
+                   两种算法等价看不出差别，但 999 冲刺（1 个128分音 value=999）会让 linefp 在 8ms 内
+                   跳过整段 fp-span ⇒ 点击后 body 秒塌 = 「部分长条打击后就消失」
+                   （Message SP t≈22.9/24.3/25.1 三处，各叠两条 note）；负流速段则反过来只缩不完。
+                   修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
+                const hold_full = note.hold_length * h;
+                const hold_shrink = note.clicked
+                    ? hold_full * Math.min(1, Math.max(0, (t - note.sect) / Math.max(note.secht, 1e-6)))
+                    : 0;
                 const note_body_height = Math.max(
-                    note.hold_length * h
-                    + Math.min(0, note_fp)
+                    hold_full
+                    - hold_shrink
                     + (note.clicked ? this_note_head_height / 2 : 0)
                     - note_tail_height / 2
                     , 0
@@ -2017,7 +2186,11 @@ const render = () => {
             /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
                effect Canvas 上（画在判定线/note 之下），所以场景拆成
                「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
-            const split = !!(C.fx_eff && C.fx && C.fx_enabled && !C.fx_failed);
+            /* F5（audit 2026-10-06 修复）：不只异象 —— 任何带方块的谱也分层，
+               否则非 split 路径会把 disabled 方块烘进含 note/判定线的整帧
+               （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
+            const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
+            const split = !!((C.fx_eff || has_blocks) && C.fx && C.fx_enabled && !C.fx_failed);
             if (split) {
                 render_scene(C.bg_cv.getContext("2d"), t, "bg");
                 render_scene(C.scene_cv.getContext("2d"), t, "fg");
