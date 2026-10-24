@@ -3325,11 +3325,13 @@ const open_library = () => {
     if (library_open() || lib_loading) return;
     pause();
     ui.start_overlay.classList.add("hidden");
+    ui.library_close.disabled = !C.chart.data;
     ui.library_overlay.classList.remove("hidden");
 };
 
 const close_library = () => {
-    if (!library_open()) return;
+    // 首次启动还没有选谱，此时不能关闭到空白画面或显示无谱面的开始按钮。
+    if (!library_open() || !C.chart.data) return;
     ui.library_overlay.classList.add("hidden");
     if (!chart_started) ui.start_overlay.classList.remove("hidden");
 };
@@ -3480,12 +3482,9 @@ const init_player = async () => {
     const lib_manifest = await load_json_or_null(R("/res/library/index.json"));
     if (lib_manifest && Array.isArray(lib_manifest.charts) && lib_manifest.charts.length > 0) {
         render_library(lib_manifest.charts);
-        const s6 = lib_manifest.charts.find(e => 
-            (e.slug && e.slug.toLowerCase() === "s6") || 
-            (e.name && e.name.toLowerCase() === "s6")
-        ) || lib_manifest.charts[0];
         open_library();
-        await select_chart(s6);
+        // 所有设备启动后都停留在谱面库，用户选谱后才加载歌曲并显示 Click to start。
+        ui.loading_overlay.classList.add("hidden");
     } else {
         await load_chart(R("/res/s6"));
         ui.library_count.textContent = "未导入：py import_library.py";
