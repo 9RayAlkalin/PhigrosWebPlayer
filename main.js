@@ -84,6 +84,8 @@ const C = {
     note_imgs: {},
     chart: {},
     hit_fx_imgs: [],
+    // 自动演奏的分数/Combo 由谱面结算时间轴更新；combo >= 3 时显示数字和标签。
+    game_hud: { score: 0, combo: 0, imgs: {} },
     fx_enabled: true,
     fx_failed: false,
     block_enabled: true
@@ -2234,6 +2236,7 @@ const render_scene = (sctx, t, mode) => {
 const render_frame_at = (t_raw) => {
     if (!cv.width || !cv.height) return;
     const t = t_raw - C.chart.data.offset;
+    update_game_score(t);
     /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
        effect Canvas 上（画在判定线/note 之下），所以场景拆成
        「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
@@ -2249,6 +2252,7 @@ const render_frame_at = (t_raw) => {
         render_scene(C.scene_cv.getContext("2d"), t);
     }
     apply_postfx(C.scene_cv, cv, t, split ? C.bg_cv : null);
+    draw_game_hud(t_raw);
 };
 
 const render = () => {
@@ -2535,12 +2539,12 @@ const wait_encoder = async (enc, abort_check) => {
     } while (enc.encodeQueueSize > 8);
 };
 
-/* 片段导出起点预置：顺序播放时 render_scene 在 note.sect < t 的第一帧就把 clicked
-   置上，所以 t0 时刻的正确状态 = clicked ⇔ sect < t0。不预置的话，跨起点的 hold
-   体会以全长姿态出现在片段开头（hold 收缩只在 clicked 后生效）。 */
+/* 导出/跳转预置：t0 是音乐秒，先减谱面 offset，clicked ⇔ sect < 谱面秒。
+   预置可避免补播历史打击音，并让跨起点的 Hold 立即按已命中的状态收缩。 */
 const preclick_notes = t0 => {
+    const t = t0 - C.chart.data.offset;
     for (const line of C.chart.data.judgeLineList) {
-        for (const note of line.notes) note.clicked = note.sect < t0;
+        for (const note of line.notes) note.clicked = note.sect < t;
     }
 };
 
@@ -2784,7 +2788,7 @@ const export_video = async (opt = {}) => {
         C.video_export_cancelled = false;
         resize_to_window();
         clock_seek(prev_pos);
-        reset_notes();
+        preclick_notes(prev_pos);
         update_progress(prev_pos);
         // 立刻按窗口尺寸重画一帧（后台标签页 rAF 可能被挂起，不能等它）
         try { render_frame_at(clock_t()); } catch (e) {}
@@ -2948,6 +2952,7 @@ const init_chart = () => {
         }
     }
 
+    init_game_score();
     data.click_effect_collection = [];
 
     for (const line of data.judgeLineList) {
@@ -3115,7 +3120,124 @@ const load_chart = async (dir, assetDir, anomaly) => {
     ui.loading_overlay.classList.add("hidden");
 };
 
+/* ---------------- 自动演奏计分 ----------------
+   ScoreControl.Update @0x1D87A1C：普通模式
+   score = (perfect + 0.65*good)/总note数*900000 + maxcombo/总note数*100000。
+   当前播放器所有 note 都自动 Perfect；每个 note 只结算一次，Hold 中途特效不计分。
+   HoldControl.Judge @0x1D83B50：已命中的 Hold 在尾端前0.22秒结算，且不能早于头部命中。
+   使用排序后的结算时间二分查找，结果仅由当前谱面时间决定：倒退、跳转、重复绘制和
+   非零起点的视频导出都不依赖 clicked 或此前渲染过多少帧。 */
+const init_game_score = () => {
+    const times = [];
+    for (const line of C.chart.data.judgeLineList) {
+        for (const note of line.notes) {
+            times.push(note.is_hold ? Math.max(note.sect, note.hold_end_time - 0.22) : note.sect);
+        }
+    }
+    times.sort((a, b) => a - b);
+    C.chart.scoring = { times, total: times.length, perfect: 0, combo: 0, max_combo: 0, score: 0 };
+    update_game_score(-Infinity);
+};
+
+const update_game_score = t => {
+    const scoring = C.chart.scoring;
+    if (!scoring) return;
+    let lo = 0, hi = scoring.total;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        // 与现有自动命中 note.sect < t 一致，边界当帧尚未结算。
+        if (scoring.times[mid] < t) lo = mid + 1;
+        else hi = mid;
+    }
+    scoring.perfect = scoring.combo = scoring.max_combo = lo;
+    // 原版使用 float32 分步计算并在显示时 +0.5 取整；不要逐 note 累加已取整的单价。
+    const f = Math.fround;
+    const base = scoring.total ? f(f(lo / scoring.total) * 900000) : 0;
+    const bonus = scoring.total ? f(f(lo * 100000) / scoring.total) : 0;
+    scoring.score = Math.min(1000000, Math.floor(f(f(base + bonus) + 0.5)));
+    C.game_hud.score = scoring.score;
+    C.game_hud.combo = scoring.combo;
+};
+
 /* ---------------- HUD ---------------- */
+
+const load_game_hud = async () => {
+    const font = new FontFace("PhiHUD", `url("${R("/res/hud/PhiHUD.ttf")}")`);
+    await Promise.all([
+        load_img(R("/res/hud/pause.png")).then(img => C.game_hud.imgs.pause = img),
+        load_img(R("/res/hud/progress.png")).then(img => C.game_hud.imgs.progress = img),
+        font.load().then(face => document.fonts.add(face)).catch(err => {
+            console.warn("HUD 字体载入失败，使用备用字体：", err);
+        })
+    ]);
+};
+
+// Level.unity 的 HUD 是 World Space Canvas（局部比例 0.01），相机正交半高 5。
+// 因此可见高度是 1000 个 UI 单位，CanvasScaler 的 1920×1080 / match=0.6 不参与屏幕适配。
+// LevelUICont.Update @0x1D81B18 会覆盖四角元素的 localPosition，不能使用静态 anchoredPosition。
+// UI 开场动画结束后父节点比例为 1；这里先复现正常游玩期间的布局。
+const game_hud_layout = (w = cv.width, h = cv.height) => {
+    const scale = h / 1000;
+    const width = w / scale;
+    const half_width = w / h >= 16 / 9 ? 888.888916015625 : width / 2;
+    const left = width / 2 - half_width;
+    const right = width / 2 + half_width;
+    return { scale, width, height: 1000, half_width,
+        // Pause pivot=(0.5,0.5)，Score pivot=(0.5,0.5)、宽400、MiddleRight。
+        pause: { x: left + 50.589 - 34.262 / 2, y: 500 - 444.3 - 37.966 / 2,
+            width: 34.262, height: 37.966 },
+        score: { x: right - 237.39 + 200, y: 500 - 445.7 },
+        combo: { x: width / 2, y: 500 - 452 },
+        combo_text: { x: width / 2, y: 500 - 405 },
+        // 底部两个 Rect 的 pivot 在底边，高46；Middle 对齐的文字中心比 pivot 高23。
+        song: { x: left + 40, y: 500 + 473.2 - 23 },
+        level: { x: right - 40, y: 500 + 473.2 - 23 },
+        // ProgressControl.Update @0x1D8600C：pivot=(1,1)，右端 x=a*(2*p-1)、y=500。
+        // 精灵本体宽1919、高11，横向平移后由窗口裁切，不按进度拉伸精灵。
+        progress: { left, span: 2 * half_width, width: 1919, height: 11 } };
+};
+
+const draw_game_hud = t_raw => {
+    if (!chart_started || lib_loading || library_open()) return;
+    const hud = C.game_hud;
+    const layout = game_hud_layout();
+    ctx.save();
+    ctx.setTransform(layout.scale, 0, 0, layout.scale, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#fff";
+    ctx.textBaseline = "middle";
+
+    // 原版进度取 nowTime / audioLength，nowTime = audioTime - 谱面 offset。
+    const duration = C.chart.music.duration || C.chart.duration || 1;
+    const progress = Math.max(0, Math.min(1, (t_raw - C.chart.data.offset) / duration));
+    if (hud.imgs.progress && progress > 0) {
+        const bar = layout.progress;
+        ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
+            0, bar.width, bar.height);
+    }
+    const button = layout.pause;
+    if (hud.imgs.pause) ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height);
+
+    const text = (value, size, align, x, y, max_width) => {
+        const str = String(value);
+        ctx.font = `${size}px PhiHUD, sans-serif`;
+        const width = ctx.measureText(str).width;
+        if (width > max_width) ctx.font = `${size * max_width / width}px PhiHUD, sans-serif`;
+        ctx.textAlign = align;
+        ctx.fillText(str, x, y);
+    };
+    text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400);
+    if (hud.combo > 2) {
+        text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400);
+        text("COMBO", 24, "center", layout.combo_text.x, layout.combo_text.y, 200);
+    }
+    const name_width = Math.min(650, Math.max(1, (layout.level.x - layout.song.x - 24) / 2));
+    text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width);
+    text(C.chart.info.level || "", 36, "right", layout.level.x, layout.level.y, name_width);
+    ctx.restore();
+};
 
 const fmt_time = v => {
     if (!isFinite(v) || v < 0) v = 0;
@@ -3145,12 +3267,6 @@ const draw_progress_marks = () => {
         const i = document.createElement("i");
         i.style.left = `${Math.max(0, Math.min(1, v / dur)) * 100}%`;
         ui.progress_marks.appendChild(i);
-    }
-};
-
-const reset_notes = () => {
-    for (const line of C.chart.data.judgeLineList) {
-        for (const note of line.notes) note.clicked = false;
     }
 };
 
@@ -3185,7 +3301,9 @@ const seek = v => {
     v = Math.max(0, Math.min(C.chart.duration, v));
     if (!m.paused && !m.ended) m.currentTime = Math.min(v, m.duration);
     clock_seek(v);
-    reset_notes();
+    // 跳过的 note 视为已自动命中，避免跳转后补播全部历史打击音。
+    preclick_notes(v);
+    update_game_score(v - C.chart.data.offset);
     update_progress(v);
 };
 
@@ -3280,6 +3398,8 @@ window.onload = async () => {
 
     resize_to_window();
     window.onresize = resize_to_window;
+    document.addEventListener("fullscreenchange", resize_to_window);
+    document.addEventListener("webkitfullscreenchange", resize_to_window);
 
     C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"));
     C.click_sounds[C.note.hold] = C.click_sounds[C.note.tap];
@@ -3333,6 +3453,8 @@ window.onload = async () => {
     C.block.imgs.displace = await load_img(R("/res/BlockNoise1.png"));
     C.block.imgs.spark = await load_img(R("/res/PointNoise.png"));
 
+    await load_game_hud();
+
     // 着色器必须先就位：fx_init 在第一次 apply_postfx 时才惰性编译
     await load_shaders();
 
@@ -3352,6 +3474,18 @@ window.onload = async () => {
     }
 
     ui.start_overlay.onclick = () => {
+        // 在用户点击/按空格的同步调用中请求整页全屏，保留底栏与谱面库等浮层。
+        // 不等待全屏结果：浏览器不支持或拒绝时仍按原流程开始播放。
+        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+            const root = document.documentElement;
+            const request = root.requestFullscreen || root.webkitRequestFullscreen;
+            if (request) {
+                try {
+                    const result = request.call(root);
+                    if (result && result.catch) result.catch(() => {});
+                } catch (e) { /* 全屏不可用时继续窗口播放 */ }
+            }
+        }
         ui.start_overlay.classList.add("hidden");
         chart_started = true;
         play();
@@ -3362,6 +3496,18 @@ window.onload = async () => {
     };
 
     ui.btn_play.onclick = toggle_play;
+
+    // HUD 暂停图标复用播放器的播放/暂停操作；暂停菜单留待后续移植。
+    cv.addEventListener("click", e => {
+        if (!chart_started || lib_loading || library_open() || export_open() || C.video_export_active) return;
+        const rect = cv.getBoundingClientRect();
+        const layout = game_hud_layout();
+        const x = (e.clientX - rect.left) * cv.width / rect.width / layout.scale;
+        const y = (e.clientY - rect.top) * cv.height / rect.height / layout.scale;
+        const button = layout.pause;
+        if (x >= button.x - 12 && x <= button.x + button.width + 12 &&
+            y >= button.y - 12 && y <= button.y + button.height + 12) toggle_play();
+    });
 
     ui.btn_library.onclick = open_library;
     ui.library_close.onclick = close_library;
