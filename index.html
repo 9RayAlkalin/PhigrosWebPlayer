@@ -15,12 +15,12 @@
 
         <div id="start-overlay" class="hidden"><span>Click to start</span></div>
 
-        <div id="loading-overlay" class="hidden">
-            <div id="loading-label">Loading</div>
+        <div id="loading-overlay">
+            <div id="loading-label">正在启动播放器</div>
             <div id="loading-bar">
                 <div id="loading-fill"></div>
             </div>
-            <div id="loading-text">0%</div>
+            <div id="loading-text">正在加载 main.js…</div>
         </div>
 
         <div id="library-overlay" class="hidden">
@@ -247,6 +247,9 @@
         font-size: 13px;
         font-variant-numeric: tabular-nums;
         color: var(--hud-fg-dim);
+        max-width: 90vw;
+        overflow-wrap: anywhere;
+        text-align: center;
     }
 
     /* ---- 谱面库（import_library.py 生成的 res/library/index.json 驱动） ---- */
@@ -522,4 +525,4 @@
     }
 </style>
 
-<script src="main.js"></script>
+<script src="main.js" onerror="document.querySelector('#loading-label').textContent='启动失败'; document.querySelector('#loading-text').textContent='main.js 加载失败，请检查网络后刷新页面。'"></script>

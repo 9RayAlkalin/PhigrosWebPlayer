@@ -151,6 +151,7 @@ const R = p => BASE + String(p).replace(/^\/+/, "");
 
 const load_audio = async (url, on_progress) => {
     const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status}`);
     // 音频要 decodeAudioData，进度按字节比例报（解码耗时算不进进度条，但解码很快）
     return await actx.decodeAudioData(await read_with_progress(resp, on_progress));
 };
@@ -199,7 +200,7 @@ const load_img = async url => {
     const img = new Image();
     await new Promise((resolve, reject) => {
         img.onload = resolve;
-        img.onerror = reject;
+        img.onerror = () => reject(new Error(`图片加载失败：${url}`));
         img.src = url;
     });
     return img;
@@ -3042,6 +3043,7 @@ const load_chart = async (dir, assetDir, anomaly) => {
         ui.loading_text.textContent = `${Math.round(pct * 100)}%`;
     };
     ui.loading_overlay.classList.remove("hidden");
+    ui.loading_label.textContent = "正在加载谱面";
     update();
 
     const info = await load_json(`${dir}/info.json`);
@@ -3390,7 +3392,7 @@ const select_chart = async e => {
     lib_loading = false;
 };
 
-window.onload = async () => {
+const init_player = async () => {
     C.scene_cv = document.createElement("canvas");
     C.bg_cv = document.createElement("canvas");   // 异象分层：曲绘专用背景画布
     C.block_cv = document.createElement("canvas");
@@ -3401,22 +3403,49 @@ window.onload = async () => {
     document.addEventListener("fullscreenchange", resize_to_window);
     document.addEventListener("webkitfullscreenchange", resize_to_window);
 
-    C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"));
+    // 首次访问外网时资源可能很慢：立即显示启动进度，独立资源并行下载。
+    // 每项最多等待60秒，失败时保留具体错误，避免所有浮层隐藏后的无提示黑屏。
+    let boot_done = 0, boot_failed = false;
+    const tasks = [
+        ["res/click.ogg", async () => C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"))],
+        ["res/drag.ogg", async () => C.click_sounds[C.note.drag] = await load_audio(R("/res/drag.ogg"))],
+        ["res/flick.ogg", async () => C.click_sounds[C.note.flick] = await load_audio(R("/res/flick.ogg"))],
+        ...["click", "drag", "hold", "flick", "click_mh", "drag_mh", "hold_mh", "flick_mh"].map(key =>
+            [`res/${key}.png`, async () => C.note_imgs[key] = await load_img(R(`/res/${key}.png`))]),
+        ["res/respack.json", async () => C.respack_info = await load_json(R("/res/respack.json"))],
+        ["res/hit_fx.png", async () => C.hit_fx = await load_img(R("/res/hit_fx.png"))],
+        ["res/BlockNoise1.png", async () => C.block.imgs.displace = await load_img(R("/res/BlockNoise1.png"))],
+        ["res/PointNoise.png", async () => C.block.imgs.spark = await load_img(R("/res/PointNoise.png"))],
+        ["HUD 字体和图标", load_game_hud],
+        ["shader/ 着色器", load_shaders]
+    ];
+    const pending = new Set(tasks.map(([name]) => name));
+    const boot_progress = () => {
+        if (boot_failed) return;
+        ui.loading_fill.style.width = `${boot_done / tasks.length * 100}%`;
+        ui.loading_text.textContent = `${boot_done}/${tasks.length} · 等待 ${[...pending].join("、")}`;
+    };
+    boot_progress();
+    await Promise.all(tasks.map(async ([name, load]) => {
+        let timer;
+        try {
+            await Promise.race([
+                load(),
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`加载超时：${name}`)), 60000);
+                })
+            ]);
+            pending.delete(name);
+            boot_done++;
+            boot_progress();
+        } catch (err) {
+            boot_failed = true;
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+    }));
     C.click_sounds[C.note.hold] = C.click_sounds[C.note.tap];
-    C.click_sounds[C.note.drag] = await load_audio(R("/res/drag.ogg"));
-    C.click_sounds[C.note.flick] = await load_audio(R("/res/flick.ogg"));
-
-    C.note_imgs.click = await load_img(R("/res/click.png"));
-    C.note_imgs.drag = await load_img(R("/res/drag.png"));
-    C.note_imgs.hold = await load_img(R("/res/hold.png"));
-    C.note_imgs.flick = await load_img(R("/res/flick.png"));
-
-    C.note_imgs.click_mh = await load_img(R("/res/click_mh.png"));
-    C.note_imgs.drag_mh = await load_img(R("/res/drag_mh.png"));
-    C.note_imgs.hold_mh = await load_img(R("/res/hold_mh.png"));
-    C.note_imgs.flick_mh = await load_img(R("/res/flick_mh.png"));
-
-    C.respack_info = await load_json(R("/res/respack.json"));
 
     [C.note_imgs.hold_head, C.note_imgs.hold_body, C.note_imgs.hold_tail] =
         clip_hold(C.note_imgs.hold, C.respack_info.holdAtlas);
@@ -3433,8 +3462,6 @@ window.onload = async () => {
     C.hold_body_imgs = [C.note_imgs.hold_body, C.note_imgs.hold_mh_body];
     C.hold_tail_imgs = [C.note_imgs.hold_tail, C.note_imgs.hold_mh_tail];
 
-    C.hit_fx = await load_img(R("/res/hit_fx.png"));
-
     for (let j = 0; j < C.respack_info.hitFx[1]; j++) {
         for (let i = 0; i < C.respack_info.hitFx[0]; i++) {
             C.hit_fx_imgs.push(
@@ -3449,15 +3476,7 @@ window.onload = async () => {
         }
     }
 
-    // _DisplaceMap = BlockNoise1.png、_SparkMap = PointNoise.png，都只取 .r 通道
-    C.block.imgs.displace = await load_img(R("/res/BlockNoise1.png"));
-    C.block.imgs.spark = await load_img(R("/res/PointNoise.png"));
-
-    await load_game_hud();
-
-    // 着色器必须先就位：fx_init 在第一次 apply_postfx 时才惰性编译
-    await load_shaders();
-
+    ui.loading_text.textContent = "正在加载谱面库…";
     const lib_manifest = await load_json_or_null(R("/res/library/index.json"));
     if (lib_manifest && Array.isArray(lib_manifest.charts) && lib_manifest.charts.length > 0) {
         render_library(lib_manifest.charts);
@@ -3589,3 +3608,11 @@ window.onload = async () => {
 
     console.log(C);
 };
+
+window.onload = () => init_player().catch(err => {
+    console.error("播放器启动失败：", err);
+    ui.start_overlay.classList.add("hidden");
+    ui.loading_overlay.classList.remove("hidden");
+    ui.loading_label.textContent = "启动失败";
+    ui.loading_text.textContent = `${err.message || err}（请检查网络后刷新页面）`;
+});
